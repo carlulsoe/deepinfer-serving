@@ -1,0 +1,40 @@
+[project]
+name = "deepinfer-serving"
+version = "0.1.0"
+description = "KV-cache storage, PD disaggregation, load balancing and autoscaling for DeepInfer, tested through mini-DeepInfer"
+readme = "README.md"
+authors = [
+    { name = "Carl Ulsøe Christensen", email = "carlulsoe@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.4",
+    "torch>=2.14.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: runs on CUDA; skipped when CUDA is unavailable"]
