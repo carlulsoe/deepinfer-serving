@@ -1,6 +1,7 @@
 # mini-DeepInfer interface contract
 
-Status: **draft for review**. Upstream reference: DeepInfer
+Status: **approved 2026-10-20; implemented in milestone 1**. Changes made during implementation are folded in
+below; §8 changed most. Upstream reference: DeepInfer
 `774ce244b87cc0eb8d4b94ab9f5de2ab22049f01` (see `reference/DEEPINFER_PIN.md`). Upstream paths
 below are relative to that checkout. "Q&A" means `doc/inference_deployment_qa.md`.
 
@@ -64,7 +65,8 @@ e.g. after loading cache). `multi_modal_data` must be `None`. `extra` is accepte
 `chunk_checkpoints` is honored by the prefill scheduler as upstream.
 
 `SamplingParams`: we keep `max_tokens`, `ignore_eos`, `temperature`, `eos_id`. Only greedy decoding
-is implemented; `temperature != 0` is rejected.
+is implemented; `temperature != 0` is rejected. The default stays at upstream's `1.0`, so callers must pass
+`temperature=0.0`.
 
 ### Other methods mirrored
 
@@ -74,7 +76,8 @@ is implemented; `temperature != 0` is rejected.
 
 `step()` returns `list[RequestOutput]` instead of an array of pooled pointers. `RequestOutput`
 keeps `request_id`, `prompt_len`, `token_id`, `finish_reason`, `finished`, `num_output_tokens`.
-One output per scheduled sequence that produced a token this step, as upstream.
+One output per scheduled sequence that produced a token this step, as upstream. Ignored sequences
+(aborted before prefill, too long) produce one output with `token_id = -1` and `finished = True`.
 
 ## 4. One `step()`, and when each hook fires
 
@@ -160,6 +163,7 @@ Exposed to Python as upstream: `add_sequence`, `abort_sequence`, `try_allocate_s
 | `state_id` | index of the sequence's state slot, `-1` if none |
 | `swa_valid_start` | lowest position whose SWA keys are valid; SWA attention ignores keys below it (upstream `prepare_tensor_input_v4.cpp`) |
 | `last_copy_state_token_idx` | `num_cached_tokens` at the most recent `do_copy_state` |
+| `kv_reuse_tokens` | **mini-only.** Block KV for `[0, kv_reuse_tokens)` was loaded from a cache hit; the forward pass reads it and never overwrites it (§8). Upstream's equivalent is in withheld code |
 | `chunked_rest_len`, `chunk_checkpoints` | chunked-prefill bookkeeping |
 | `sampling_params` | as passed to `add_request` |
 
@@ -173,7 +177,7 @@ Two layer kinds, configurable pattern (default `["full", "swa", "full", "swa"]`)
   One block holds `block_size` consecutive positions for *all* full-attention layers, so a block is
   the unit of persistence and transfer. Position `p` of a sequence lives in
   `block_table[p // block_size]`, offset `p % block_size`.
-- **State slot** (SWA layers): `states[num_state_slots, n_swa_layers, ring, 2, n_heads, head_dim]`,
+- **State slot** (SWA layers): `states[num_state_slots, n_swa_layers, 2, ring, n_heads, head_dim]`,
   one slot per sequence (`state_id`). Position `p` lives at ring index `p % ring`.
   - inference window: `window + backtrack` (default 128 + 6 = 134) positions. This is what
     persists and what the handoff carries.
@@ -187,7 +191,8 @@ Two layer kinds, configurable pattern (default `["full", "swa", "full", "swa"]`)
 
 An SWA *state record at position p* is the inference window ending at `p`: the
 `window + backtrack` positions `[p - window - backtrack, p)` in position order (rearranged out of
-the ring), with positions `< 0` zero-filled. A query at position `i` attends to SWA keys at
+the ring), with positions `< 0` zero-filled. Shape `[n_swa_layers, 2, window + backtrack, n_heads, head_dim]`.
+A query at position `i` attends to SWA keys at
 positions `max(i - window + 1, swa_valid_start) … i`.
 
 ## 8. The model (mini-only; not a mirror)
@@ -203,15 +208,26 @@ Two deliberate choices make the oracles exact rather than approximately equal:
    was reached by a single prefill, a chunked prefill, decode, a cache hit, or a handoff. Results
    are bit-identical across all those paths, not merely batch-invariant. Cost: a Python loop per
    token per layer. That is fine at test scale (a few hundred tokens, 4 layers, d_model 64).
-2. **K/V are projected from the token-embedding stream, not the residual stream.** Queries come
-   from the residual stream as usual. Every cached K/V entry (block or SWA) is then a pure function
-   of `(token, position, layer)`. This is what makes the SWA-missing back-off (§10.3) exactly
-   recomputable. With residual-stream K/V, recomputing a block from an empty SWA ring cannot be
-   exact. Upstream's own replay is approximate (Q&A, "SWA bounded replay").
+2. **SWA-layer K/V are projected from the token-embedding stream; full-attention K/V from the
+   residual stream.** Queries always come from the residual stream. An SWA entry is then a pure
+   function of `(token, position, layer)`, so replaying one block from a zeroed slot rebuilds the
+   window exactly. This makes the SWA-missing back-off (§10.3) exact. Upstream's own replay is
+   approximate (Q&A, "SWA bounded replay").
+3. **Loaded block KV is never overwritten.** During the replay of `[num_cached_tokens, kv_reuse_tokens)`,
+   positions whose SWA window is truncated produce wrong residual streams. Their full-attention K/V
+   would be wrong too, so the forward pass skips block-KV writes below `kv_reuse_tokens` and reads the
+   loaded values instead. This is the Q&A's "block KV cache is reused as-is, neither recomputed nor
+   overwritten".
 
-The engine never *exploits* (2): it always reads K/V from the block table and state slot and never
-regenerates them from tokens. Negative tests show the caches are load-bearing: corrupting the
-handoff's SWA state or a stored block changes the output.
+Why not take K/V from the embeddings for *every* layer: the first implementation did, and then a
+corrupted SWA record in the store could not change the output at all. The SWA window feeds only the
+first `window` positions after the resume point. The L − (W + B) cap keeps the sampled position past
+those, and nothing else depended on them. With residual-stream full-attention K/V, those positions
+write block KV that every later position reads, so the record is load-bearing.
+
+The engine never regenerates cache contents from tokens; it always reads K/V from the block table and
+state slot. Negative tests show the caches are load-bearing: corrupting the handoff's SWA state or
+block KV, or a stored block or SWA record, changes the output.
 
 ## 9. Deliberate simplifications
 
@@ -224,6 +240,7 @@ handoff's SWA state or a stored block changes the output.
 | Sampling (temperature, top-p/k, logprobs, structured output) | greedy only | determinism |
 | Forks (`fork_seq`, `clone_states`, `clone_blocks`, `zero_states`) | not mirrored | not needed by milestone 1; the serving layer writes slots directly |
 | Preemption / recompute | not mirrored; insufficient blocks at decode → error | tests size the cache |
+| NORMAL prefill gated by KV-usage watermark (0.9) | no watermark | tests size the cache |
 | Compressed attention (`ca_*`/`ica_*` state), YOCO dropped region, MLA, MoE, FP8 formats | absent; the slot has only the stored SWA region | cache *shape* only |
 | Multimodal, compressed tokenizer, tokenizer itself | absent; callers pass token ids | |
 | `RequestOutputPool` pointers | plain `RequestOutput` objects | |
@@ -253,28 +270,35 @@ without them.
 
 PROMPT side: `send_processed_prompts()` builds a handoff for every sequence in `running` that
 finished prefill, passes it to a sink callable, and frees the sequence.
-COMPLETION side: `ServingLLMEngine.receive_handoff(h)` → `add_request(..., enqueue=False)`,
-append the output tokens, `scheduler.try_allocate_seq(seq)`, copy blocks into the block table and
-the record into the slot, `seq.num_cached_tokens = h.num_cached_tokens`,
-`scheduler.add_prompted(seq)`. Note: if the first token already ends the request (EOS or
+COMPLETION side: `ServingLLMEngine.receive_handoff(h)` checks `config_fingerprint`, then
+`add_request(..., enqueue=False)`, appends the output tokens, `scheduler.try_allocate_seq(seq)`, copies
+blocks into the block table and the record into the slot, sets
+`seq.num_cached_tokens = h.num_cached_tokens` and
+`seq.swa_valid_start = max(0, num_cached_tokens - window - backtrack)` (positions below the handed-off
+window were never in this slot), then calls `scheduler.add_prompted(seq)`. Note: if the first token already ends the request (EOS or
 `max_tokens = 1`), the PROMPT engine's output is final and no handoff is sent.
 
 ### 10.2 KV store (`kvstore.py`)
 
 ```python
 class KVStore(Protocol):
+    def has_block(self, key: BlockKey) -> bool
     def put_block(self, key: BlockKey, kv: Tensor) -> None
     def get_block(self, key: BlockKey) -> Tensor | None
+    def has_swa(self, key: BlockKey, position: int) -> bool
     def put_swa(self, key: BlockKey, position: int, state: Tensor) -> None
     def get_swa(self, key: BlockKey, position: int) -> Tensor | None
 ```
+
+`has_*` exist because upstream matches "over metadata only" (Q&A) before fetching anything.
 
 - `block_hashes(token_ids, block_size) -> list[BlockKey]`: a hash chain over full blocks,
   `h_i = sha256(h_{i-1} ‖ int32 bytes of tokens[i*bs:(i+1)*bs])`. A key identifies the whole prefix.
 - SWA records are keyed by the chain hash of the block ending at `position`. The position is
   explicit so the store can check that it is grain-aligned.
 - `InMemoryKVStore`: two dicts. Both engines in a PD pair share one instance in tests.
-- `match(store, token_ids, cfg) -> Hit`: implements the hit rule (§10.3) against a store.
+- `compute_hit(store, token_ids, *, block_size, window, backtrack) -> Hit`: implements the hit rule
+  (§10.3) using `has_*` only.
 
 ### 10.3 Hit rule
 
@@ -287,16 +311,18 @@ For input length `L` (with `G` = grain = block size, `W` = window, `B` = backtra
 4. Else if a record exists at `L1 - G` → hit `L1`; resume at `L1 - G` with that record, and
    recompute `[L1 - G, L1)` (block KV for those positions is loaded and recomputed identically).
 5. Else → hit `L1 - G`; resume at `L1 - G` with a zeroed slot and `swa_valid_start = L1 - G`.
-   Blocks `[0, L1)` are loaded.
+
+In every case blocks `[0, L1)` are loaded and `kv_reuse_tokens = L1`.
 
 `Hit` carries `cached_hit_tokens` (the hit length above), `num_cached_tokens` (where compute
-resumes), `swa_valid_start`, the blocks, and the record. `ServingLLMEngine.add_request` applies it
-through `enqueue=False` → `try_allocate_seq` → load → set fields → `scheduler.add_sequence`.
-That uses only upstream-exposed operations.
+resumes), `swa_valid_start`, the block keys, and the record position; it holds no tensors.
+`ServingLLMEngine.add_request` applies it through `enqueue=False` → `try_allocate_seq` → fetch and
+load → set fields → `scheduler.add_sequence`. That uses only upstream-exposed operations. If
+allocation fails or a block has disappeared since the match, the request is served cold.
 
 Step 5 is exact in mini because suffix queries at `>= L1` only see SWA keys at `>= L1 - W + 1 > L1 - G`
-(when `W <= G`). The truncated-window outputs at `[L1 - G, L1)` feed only discarded logits and
-residual streams that no cached K/V depends on (§8).
+(when `W <= G`), which the replay rebuilt exactly (§8). The truncated-window positions
+`[L1 - G, L1)` produce only discarded logits and block-KV writes that are skipped (§8).
 
 ### 10.4 Persistence positions (implemented in `ServingLLMEngine` hooks)
 
@@ -308,9 +334,13 @@ residual streams that no cached K/V depends on (§8).
   boundary since `last_copy_state_token_idx` and overshoots it by less than `B` (upstream: "at most
   5 tokens"). Without MTP, decode advances one token per step, so every boundary is snapshotted
   exactly at the boundary.
-- **On finish** (`do_save_kvcache`, for `finished_seqs`): store any new full blocks of
+- **On finish** (`do_save_kvcache`, for `finished_seqs`, not aborted): store any new full blocks of
   `[0, num_cached_tokens)` and, if a snapshot exists, the record at
   `floor(last_copy_state_token_idx / G) * G` taken from the replica.
+- Blocks already in the store are not re-written (`has_block`).
+- A record at `p` is skipped when `swa_valid_start > 0` and `p - window - backtrack < swa_valid_start`:
+  the window would include positions this slot never held. This occurs after a back-off hit, or on a
+  COMPLETION engine whose first decode snapshot lands just past a boundary.
 
 ## 11. Upstream ambiguities and the reading we chose
 
@@ -359,8 +389,10 @@ residual streams that no cached K/V depends on (§8).
    than one block, non-contiguous block hits.
 4. **Persistence positions**: record position after prefill, nothing stored for a non-final chunk,
    decode snapshots exactly at grain crossings, record at finish.
-5. **Negative**: corrupting the handoff SWA state or a stored block changes the output.
+5. **Negative**: corrupting the handoff's SWA state or block KV, or a stored block or SWA record,
+   changes the output.
 
-All oracles run with a small config (e.g. block 16, window 16, backtrack 3, extra 16) and once at
-the defaults (128 / 128 / 6 / 128). The PD and cache-hit oracles run on CPU and, under
-`@pytest.mark.gpu`, on CUDA.
+Tests: `tests/test_oracle_pd.py`, `tests/test_oracle_cache_hit.py`, `tests/test_hit_rule.py`,
+`tests/test_persistence.py`. Everything runs with a small config (block 16, window 16, backtrack 3,
+extra 16) and at the defaults (128 / 128 / 6 / 128). The PD and cache-hit oracles also run under
+`@pytest.mark.gpu` on CUDA.
