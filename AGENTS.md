@@ -26,3 +26,6 @@ uv run pytest -m gpu                     # GPU variants only
 - Serving code plugs into the engine through the `LLMEngine` hooks, the handoff object, and the
   KV store interface. Do not reach into engine internals from serving code when a hook exists.
 - Do not vendor or submodule DeepInfer.
+- Cross-process code uses the `spawn` start method (CUDA-safe). A script that starts a `PDCoordinator`
+  must be a file with an `if __name__ == "__main__":` guard, not stdin or `python -c`.
+- No pickle on any link between processes: control messages are JSON, handoffs use `wire.py`.

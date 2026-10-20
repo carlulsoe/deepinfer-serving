@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -12,6 +13,8 @@ from deepinfer_serving.engine.config import MiniConfig
 from deepinfer_serving.engine.engine_type import EngineType
 from deepinfer_serving.engine.llm_engine import LLMEngine
 from deepinfer_serving.handoff import Handoff
+from deepinfer_serving.pd.coordinator import PDCoordinator
+from deepinfer_serving.pd.instance import InstanceSpec
 from deepinfer_serving.serving_engine import ServingLLMEngine
 
 SMALL = MiniConfig(block_size=16, window=16, backtrack=3, store_extra=16, num_gpu_blocks=128)
@@ -72,7 +75,7 @@ def run_pd(
         handoff = Handoff.from_bytes(data)
         if corrupt is not None:
             handoff = corrupt(handoff)
-        decode.receive_handoff(handoff)
+        assert decode.receive_handoff(handoff) is not None
     for rid, toks in run(decode).items():
         out[rid].extend(toks)
     return out
@@ -80,3 +83,37 @@ def run_pd(
 
 def noise_like(t: torch.Tensor) -> torch.Tensor:
     return torch.randn(t.shape, generator=torch.Generator().manual_seed(123))
+
+
+# ---- cross-process PD (milestone 2) ----
+
+
+def pd_coordinator(
+    p_config: MiniConfig, d_config: MiniConfig, p_device: str = "cpu", d_device: str = "cpu"
+) -> PDCoordinator:
+    return PDCoordinator(
+        InstanceSpec(EngineType.PROMPT, p_config, p_device), InstanceSpec(EngineType.COMPLETION, d_config, d_device)
+    )
+
+
+def assert_baseline(co: PDCoordinator, timeout: float = 30.0) -> None:
+    """Every request terminated exactly once, no protocol errors, and allocator counts back to baseline."""
+    co.run_until_done(timeout)
+    for role in co.ROLES:
+        deadline = time.monotonic() + timeout
+        while True:
+            s = co.stats(role)
+            at_baseline = (
+                s["free_blocks"] == s["num_blocks"]
+                and s["free_slots"] == s["num_slots"]
+                and s["unfinished"] == 0
+                and s["outbox"] == 0
+                and s["inbox"] == 0
+            )
+            if at_baseline:
+                break
+            assert time.monotonic() < deadline, f"{role} not at baseline: {s}"
+            co.poll(0.01)
+    # Checked last: a stats reply at baseline means every earlier event from that instance has been handled.
+    assert co.errors == []
+    assert co.duplicate_terminals == 0

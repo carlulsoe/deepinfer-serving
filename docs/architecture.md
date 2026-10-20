@@ -64,12 +64,15 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
 **Interfaces.**
 
 - `Handoff`: a frozen record with identity, sampling params, tokens, `num_cached_tokens`, block KV,
-  SWA state, and a config fingerprint; `to_bytes()` / `from_bytes()` (contract §10.1). Transports
-  change only how the bytes move: in-process, then cross-process, later RDMA.
+  SWA state, and a config fingerprint; `to_bytes()` / `from_bytes()` (contract §10.1) in the
+  pickle-free, checksummed format of [ADR 0007](decisions/0007-handoff-wire-format.md). Transports
+  change only how the bytes move: in-process, then cross-process (milestone 2), later RDMA.
 - `KVStore` protocol: `has_block` / `put_block` / `get_block` keyed by hash-chain `BlockKey`,
   `has_swa` / `put_swa` / `get_swa` keyed by block key plus a grain-aligned position (contract §10.2).
   The `has_*` methods let matching run on metadata only. Backends: in-memory
-  (tests), local NVMe (development and one-node deployments), 3FS (optional, production).
+  (tests), local NVMe (development and one-node deployments), 3FS (optional, production). Separate
+  processes share the block tier through the filesystem, not a store server; the SWA tier stays
+  producer-local ([ADR 0008](decisions/0008-store-across-processes.md)).
 - Later: an async fetcher (store → host buffer) and a layer-wise swap-in thread, kept behind the
   same protocol. The layout is block-granular so a DualPath-style second load path can be added
   later without changing callers.
@@ -141,12 +144,17 @@ through `add_request(enqueue=False)` → `try_allocate_seq` → load → set `nu
 
 **Interfaces.** A `ServingLLMEngine(LLMEngine)` subclass, the same subclass on mini-DeepInfer and
 on real DeepInfer. An instance controller that owns one engine (or one EP group) and talks to the
-Entrypoint and the load balancers. The request state machine (`queued → prefilling → handed_off →
-decoding → finished | aborted | forwarded`) is to be specified at milestone 2.
+Entrypoint and the load balancers. In milestone 2 the instance controller is
+`pd/instance.py` (one process per engine) and a `PDCoordinator` (`pd/coordinator.py`) stands in for
+the Entrypoint's request tracking. The request state machine (`queued → prefilling → handed_off →
+decoding → finished | aborted | failed`, with `forwarded` reserved for drain), token ordering and
+abort propagation are specified in [ADR 0006](decisions/0006-request-state-machine-and-abort.md).
+Handoff ownership, release and decode admission (ack/nack, retry on `no_capacity`) are in
+[ADR 0005](decisions/0005-handoff-ownership-and-admission.md).
 
 **Oracle.**
 
-- The PD oracle across processes (milestone 2).
+- The PD oracle across processes (milestone 2: `tests/test_oracle_pd_multiprocess.py`).
 - Abort and failure tests: every request terminates exactly once; no block or state slot leaks
   (allocator counts return to baseline).
 - The drain oracle above.
@@ -280,6 +288,8 @@ src/deepinfer_serving/
   kvstore.py         KV store protocol, in-memory store, hash chain, hit rule
   handoff.py         PROMPT → COMPLETION handoff
   serving_engine.py  LLMEngine subclass implementing the hooks
+  wire.py            handoff wire format (milestone 2)
+  pd/                instance controller, coordinator, link framing (milestone 2)
 ```
 
 Later pieces get their own modules as they arrive: transport, Entrypoint and index, load

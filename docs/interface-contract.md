@@ -251,7 +251,9 @@ block KV, or a stored block or SWA record, changes the output.
 ### 10.1 Handoff (`handoff.py`)
 
 What a PROMPT engine gives a COMPLETION engine. A frozen dataclass with CPU tensors and
-`to_bytes()` / `from_bytes()`. Later transports change only how it moves.
+`to_bytes()` / `from_bytes()`, which use the pickle-free, SHA-256-checked wire format of
+[ADR 0007](decisions/0007-handoff-wire-format.md) (`wire.py`; `from_bytes` raises `WireError`).
+Later transports change only how it moves.
 
 | Field | Content |
 |---|---|
@@ -270,8 +272,11 @@ without them.
 
 PROMPT side: `send_processed_prompts()` builds a handoff for every sequence in `running` that
 finished prefill, passes it to a sink callable, and frees the sequence.
-COMPLETION side: `ServingLLMEngine.receive_handoff(h)` checks `config_fingerprint`, then
-`add_request(..., enqueue=False)`, appends the output tokens, `scheduler.try_allocate_seq(seq)`, copies
+COMPLETION side: `ServingLLMEngine.receive_handoff(h)` first runs `validate_handoff(h)`, which raises
+`ValueError` on a fingerprint mismatch, inconsistent lengths, out-of-vocab tokens, or tensor shapes that
+do not match this engine's layout. It then calls `add_request(..., enqueue=False)`, appends the output
+tokens, and calls `scheduler.try_allocate_seq(seq)`; if that fails it returns `None` and keeps nothing
+([ADR 0005](decisions/0005-handoff-ownership-and-admission.md)). Otherwise it copies
 blocks into the block table and the record into the slot, sets
 `seq.num_cached_tokens = h.num_cached_tokens` and
 `seq.swa_valid_start = max(0, num_cached_tokens - window - backtrack)` (positions below the handed-off

@@ -176,10 +176,26 @@ class ServingLLMEngine(LLMEngine):
             config_fingerprint=self.config.fingerprint(),
         )
 
-    def receive_handoff(self, handoff: Handoff) -> Sequence:
+    def validate_handoff(self, handoff: Handoff) -> None:
+        """Check a handoff against this engine's config before it touches device memory. Raises ``ValueError``."""
         c = self.config
         if handoff.config_fingerprint != c.fingerprint():
             raise ValueError("handoff was produced by an engine with a different model/cache config")
+        n = handoff.num_cached_tokens
+        if not (0 < handoff.prompt_len == n < len(handoff.token_ids) <= c.max_model_len):
+            raise ValueError("inconsistent prompt_len / num_cached_tokens / token_ids")
+        if any(not 0 <= t < c.vocab_size for t in handoff.token_ids):
+            raise ValueError("token id out of range")
+        num_blocks = (n + c.block_size - 1) // c.block_size
+        block_shape = (num_blocks, c.n_full_layers, 2, c.block_size, c.n_heads, c.head_dim)
+        swa_shape = (c.n_swa_layers, 2, c.swa_window_len, c.n_heads, c.head_dim)
+        if tuple(handoff.block_kv.shape) != block_shape or tuple(handoff.swa_state.shape) != swa_shape:
+            raise ValueError("block_kv or swa_state shape does not match this engine's cache layout")
+
+    def receive_handoff(self, handoff: Handoff) -> Sequence | None:
+        """Admit a handed-off sequence for decode. Returns ``None`` if there is no capacity (ADR 0005)."""
+        c = self.config
+        self.validate_handoff(handoff)
         seq = super().add_request(
             handoff.user_id,
             handoff.request_id,
@@ -191,7 +207,7 @@ class ServingLLMEngine(LLMEngine):
         for token in handoff.token_ids[handoff.prompt_len :]:
             seq.append_token_id(token)
         if not self.scheduler.try_allocate_seq(seq):
-            raise RuntimeError("no room for handed-off sequence")
+            return None
         self.cache_engine.write_blocks(seq.block_table[: handoff.block_kv.shape[0]], handoff.block_kv)
         self.cache_engine.load_swa_record(seq.state_id, handoff.swa_state, handoff.num_cached_tokens)
         seq.num_cached_tokens = handoff.num_cached_tokens

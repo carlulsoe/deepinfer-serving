@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import io
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 
@@ -25,10 +24,14 @@ class Handoff:
     config_fingerprint: str
 
     def to_bytes(self) -> bytes:
-        buf = io.BytesIO()
-        torch.save(asdict(self), buf)
-        return buf.getvalue()
+        """Wire format of ADR 0007: JSON header + raw tensors, SHA-256 checked, no pickle."""
+        from deepinfer_serving.wire import encode_handoff
+
+        return encode_handoff(self)
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Handoff:
-        return cls(**torch.load(io.BytesIO(data), weights_only=True))
+        """Parse and checksum-verify. Raises ``WireError``. Shapes are checked by the receiver."""
+        from deepinfer_serving.wire import decode_handoff
+
+        return decode_handoff(data)

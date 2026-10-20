@@ -16,6 +16,11 @@ Three kinds of document, kept separate:
   - [0002](decisions/0002-mini-deepinfer-not-vllm.md) mini-DeepInfer instead of vLLM
   - [0003](decisions/0003-mirror-not-vendor-deepinfer.md) mirror DeepInfer at a pinned commit; do not vendor it
   - [0004](decisions/0004-determinism-oracles.md) determinism oracles as the definition of done
+  - [0005](decisions/0005-handoff-ownership-and-admission.md) handoff ownership, release, and decode admission
+  - [0006](decisions/0006-request-state-machine-and-abort.md) request state machine, token order, abort propagation
+  - [0007](decisions/0007-handoff-wire-format.md) pickle-free, checksummed handoff wire format
+  - [0008](decisions/0008-store-across-processes.md) the store across processes: shared filesystem, producer-local SWA
+  - [0009](decisions/0009-cross-device-handoff.md) cross-device handoffs allowed, not oracle-checked
 
 **How we get there**
 

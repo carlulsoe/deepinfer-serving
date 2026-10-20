@@ -76,7 +76,7 @@ def test_cache_hit_through_pd() -> None:
     assert seq is not None and seq.cached_hit_tokens == 4 * SMALL.grain
     out = run(prefill)
     decode = ServingLLMEngine(SMALL, EngineType.COMPLETION)
-    decode.receive_handoff(Handoff.from_bytes(wire[0]))
+    assert decode.receive_handoff(Handoff.from_bytes(wire[0])) is not None
     out["t2"].extend(run(decode)["t2"])
     assert out == cold
 

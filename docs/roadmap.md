@@ -64,7 +64,7 @@ in `ServingLLMEngine`.
 **Status:** done (2026-10-20). All oracles pass on CPU and on the 3060 Ti; the contract is approved,
 with ambiguities A1–A7 recorded as the readings we chose.
 
-### Milestone 2: cross-process handoff
+### Milestone 2: cross-process handoff (done)
 
 PROMPT and COMPLETION engines run in separate processes, and handoffs travel over a real transport
 on one host. Introduce the request state machine and abort propagation.
@@ -76,6 +76,12 @@ on one host. Introduce the request state machine and abort propagation.
   once, and block and state-slot counts return to baseline.
 - Corrupting bytes in transit is detected by the receiver or changes the output. It must never
   pass silently.
+
+**Status:** done (2026-10-21). Decisions in ADRs 0005–0009. Tests: `test_oracle_pd_multiprocess.py`
+(small and default configs, CPU and CUDA), `test_pd_lifecycle.py` (abort at each stage, random
+aborts, corruption of header and payload), `test_pd_backpressure.py` (a full decode instance nacks and
+the prefill instance retries), `test_wire.py`, and a CPU → CUDA smoke test (ADR 0009). The transport
+is a `multiprocessing` socket pair carrying raw frames; no pickle on any link.
 
 ### Milestone 3: the store, with a local-NVMe backend
 
