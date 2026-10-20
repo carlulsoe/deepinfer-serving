@@ -35,8 +35,8 @@ cost, so routing never needs prefix affinity
 
 ## Status
 
-**Milestone 1 (in progress):** mini-DeepInfer and the determinism oracles. The interface contract
-is a draft, and milestone 1 is done when its oracles pass. See [docs/roadmap.md](docs/roadmap.md).
+**Milestone 1 (done):** mini-DeepInfer and the determinism oracles. Next is milestone 2,
+cross-process handoff. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Docs
 

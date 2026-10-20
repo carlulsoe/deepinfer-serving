@@ -45,7 +45,7 @@ The data-plane track (milestones 1–5) runs in order; each milestone's oracle m
 next starts. The control-plane track (simulator, load balancers, autoscaler) runs in parallel on
 tier 0 and joins the data plane at milestone 4.
 
-### Milestone 1: mini-DeepInfer and the oracles (current)
+### Milestone 1: mini-DeepInfer and the oracles (done)
 
 Build the stand-in engine that mirrors DeepInfer's interface and cache layout, plus in-process
 seams: `Handoff`, the in-memory `KVStore`, the hash chain, the hit rule, and the persistence hooks
@@ -61,7 +61,8 @@ in `ServingLLMEngine`.
 - The interface contract loses its "draft" status, with ambiguities A1–A7 either confirmed or
   rewritten.
 
-**Status:** in progress. The contract is a draft and the oracles do not pass yet.
+**Status:** done (2026-10-20). All oracles pass on CPU and on the 3060 Ti; the contract is approved,
+with ambiguities A1–A7 recorded as the readings we chose.
 
 ### Milestone 2: cross-process handoff
 

@@ -66,8 +66,9 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
 - `Handoff`: a frozen record with identity, sampling params, tokens, `num_cached_tokens`, block KV,
   SWA state, and a config fingerprint; `to_bytes()` / `from_bytes()` (contract §10.1). Transports
   change only how the bytes move: in-process, then cross-process, later RDMA.
-- `KVStore` protocol: `put_block` / `get_block` keyed by hash-chain `BlockKey`, `put_swa` /
-  `get_swa` keyed by block key plus a grain-aligned position (contract §10.2). Backends: in-memory
+- `KVStore` protocol: `has_block` / `put_block` / `get_block` keyed by hash-chain `BlockKey`,
+  `has_swa` / `put_swa` / `get_swa` keyed by block key plus a grain-aligned position (contract §10.2).
+  The `has_*` methods let matching run on metadata only. Backends: in-memory
   (tests), local NVMe (development and one-node deployments), 3FS (optional, production).
 - Later: an async fetcher (store → host buffer) and a layer-wise swap-in thread, kept behind the
   same protocol. The layout is block-granular so a DualPath-style second load path can be added
@@ -77,8 +78,8 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
 
 - *PD*: NORMAL output equals PROMPT → `Handoff` bytes → COMPLETION output, token for token.
 - *Cache hit*: a turn served from the store equals the same turn run cold.
-- *Negative*: corrupting one stored block or the handoff's SWA state changes the output. This
-  proves the cache is actually used.
+- *Negative*: corrupting the handoff's SWA state or block KV, or a stored block or SWA record,
+  changes the output. This proves the cache is actually used.
 - *Drain* (later): a request forwarded mid-decode finishes with the same tokens as an
   uninterrupted run.
 
@@ -95,13 +96,13 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
 
 **Upstream hooks.** None directly. It hands the engine a `Hit` that the serving subclass applies
 through `add_request(enqueue=False)` → `try_allocate_seq` → load → set `num_cached_tokens`,
-`cached_hit_tokens`, `swa_valid_start` → `scheduler.add_sequence` (contract §10.3).
+`cached_hit_tokens`, `swa_valid_start`, `kv_reuse_tokens` → `scheduler.add_sequence` (contract §10.3).
 
 **Interfaces.**
 
 - `block_hashes(token_ids, block_size) -> list[BlockKey]`: SHA-256 hash chain, one key per full
   block, each identifying its whole prefix.
-- `match(store, token_ids, cfg) -> Hit`: the hit rule. Cap at L − (window + backtrack); find
+- `compute_hit(store, token_ids, *, block_size, window, backtrack) -> Hit`: the hit rule. Cap at L − (window + backtrack); find
   the longest contiguous block prefix L1; use SWA state at L1 or L1 − 128; otherwise back off one
   block.
 - SWA directory: `locate(key, position) -> holder`, `register(...)`, `evict(...)`. Not yet

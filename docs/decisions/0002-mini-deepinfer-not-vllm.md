@@ -20,8 +20,8 @@ against, and the port to DeepInfer would be the first time the real seams were e
 We write mini-DeepInfer (`src/deepinfer_serving/engine/`): a tiny fp32 transformer that exposes
 DeepInfer's interface at the pinned commit (`EngineType`, the hooks in upstream call order, the
 `Sequence` fields, the scheduler queues) and its cache shape (paged block KV, an SWA ring slot, a
-replica region). The model is built for exact determinism: token-serial forward, and K/V projected
-from the embedding stream. It does not aim at realism or speed. The full specification and every
+replica region). The model is built for exact determinism: token-serial forward, SWA-layer K/V
+projected from the embedding stream, and loaded block KV never overwritten. It does not aim at realism or speed. The full specification and every
 deviation are in [interface-contract.md](../interface-contract.md).
 
 ## Consequences
