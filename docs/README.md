@@ -21,6 +21,7 @@ Three kinds of document, kept separate:
   - [0007](decisions/0007-handoff-wire-format.md) pickle-free, checksummed handoff wire format
   - [0008](decisions/0008-store-across-processes.md) the store across processes: shared filesystem, producer-local SWA
   - [0009](decisions/0009-cross-device-handoff.md) cross-device handoffs allowed, not oracle-checked
+  - [0010](decisions/0010-store-backends-and-eviction.md) store backends, on-disk format, LRU eviction under a watermark
 
 **How we get there**
 

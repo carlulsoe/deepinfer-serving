@@ -35,9 +35,10 @@ cost, so routing never needs prefix affinity
 
 ## Status
 
-**Milestones 1 and 2 (done):** mini-DeepInfer and the determinism oracles; cross-process handoff
-with the request state machine and abort propagation. Next is milestone 3, the store with a
-local-NVMe backend. See [docs/roadmap.md](docs/roadmap.md).
+**Milestones 1–3 (done):** mini-DeepInfer and the determinism oracles; cross-process handoff
+with the request state machine and abort propagation; the KV store with a shared local-NVMe block
+tier, LRU eviction, and cache hits that survive engine restarts. Next is milestone 4, the Entrypoint
+and index. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Docs
 

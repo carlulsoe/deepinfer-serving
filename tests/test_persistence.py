@@ -32,7 +32,7 @@ def test_after_prefill_record_position(
     engine.add_request("u", "r", greedy(4), np.asarray(tokens(length, 0), dtype=np.int32))
     engine.step()  # the prefill step
     assert store.swa_positions() == (set() if record_in_g is None else {record_in_g * g})
-    assert len(store.blocks) == length // g
+    assert len(store.block_keys()) == length // g
 
 
 @pytest.mark.parametrize("config", CONFIGS)
@@ -42,10 +42,10 @@ def test_nothing_stored_mid_chunk(config: MiniConfig) -> None:
     engine.add_request("u", "r", greedy(4), np.asarray(tokens(3 * g + 2, 0), dtype=np.int32))
     for _ in range(3):  # chunks of G, G, G
         engine.step()
-        assert store.swa_positions() == set() and not store.blocks
+        assert store.swa_positions() == set() and not store.block_keys()
     engine.step()  # last chunk (2 tokens)
     assert store.swa_positions() == {3 * g}
-    assert len(store.blocks) == 3
+    assert len(store.block_keys()) == 3
 
 
 @pytest.mark.parametrize("config", CONFIGS)
@@ -66,7 +66,7 @@ def test_decode_snapshots_at_grain_crossings(config: MiniConfig) -> None:
     assert snapshots == [2 * g, 3 * g]
     # prefill record at floor((G+B-1)/G)*G = G, finish record from the last snapshot (3G); 2G is not stored
     assert store.swa_positions() == {g, 3 * g}
-    assert len(store.blocks) == 3  # full blocks of [0, 3G + 4)
+    assert len(store.block_keys()) == 3  # full blocks of [0, 3G + 4)
 
 
 @pytest.mark.parametrize("config", CONFIGS)

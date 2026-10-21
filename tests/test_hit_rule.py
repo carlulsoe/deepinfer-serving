@@ -114,7 +114,7 @@ def test_block_hits_must_be_contiguous(config: MiniConfig) -> None:
     g = config.grain
     toks = tokens(5 * g + config.swa_window_len, seed=7)
     store = _store(config, toks, blocks=5, swa={g * i for i in range(1, 6)})
-    del store.blocks[block_hashes(toks, g)[2]]
+    store.discard_block(block_hashes(toks, g)[2])
     assert _hit(config, store, toks).cached_hit_tokens == 2 * g
 
 

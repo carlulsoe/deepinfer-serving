@@ -52,6 +52,8 @@ class RequestRecord:
     tokens_by_index: dict[int, int] = field(default_factory=dict)
     num_output_tokens: int | None = None
     reason: str = ""
+    hit: tuple[int, int, int] | None = None
+    """``(cached_hit_tokens, num_cached_tokens, swa_valid_start)`` on the prefill instance, once prefill starts."""
 
     @property
     def tokens(self) -> list[int]:
@@ -219,6 +221,8 @@ class PDCoordinator:
                 self.errors.append(f"{role}: duplicate token index {msg['index']} for {record.request_id}")
             record.tokens_by_index[msg["index"]] = msg["token"]
         elif kind in _EVENT_STATE:
+            if kind == "prefilling":
+                record.hit = tuple(msg["hit"])
             self._transition(record, _EVENT_STATE[kind], role)
         elif kind == "terminal":
             if record.state.terminal:

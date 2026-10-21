@@ -15,6 +15,7 @@ import traceback
 from collections import deque
 from dataclasses import dataclass
 from multiprocessing.connection import Connection, wait
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,10 @@ import numpy as np
 from deepinfer_serving.engine.config import MiniConfig
 from deepinfer_serving.engine.engine_type import EngineType
 from deepinfer_serving.engine.scheduler import SchedulerOutputs
+from deepinfer_serving.engine.sequence import Sequence
+from deepinfer_serving.file_store import FileKVStore
 from deepinfer_serving.handoff import Handoff
+from deepinfer_serving.kvstore import namespace
 from deepinfer_serving.pd.protocol import recv_blob, recv_msg, send_blob, send_msg
 from deepinfer_serving.serving_engine import ServingLLMEngine
 from deepinfer_serving.wire import WireError
@@ -32,10 +36,25 @@ _IDLE_WAIT_S = 0.005
 
 
 @dataclass(frozen=True)
+class StoreSpec:
+    """A ``FileKVStore`` under ``path``, one sub-directory per config (ADR 0010)."""
+
+    path: str
+    block_capacity_bytes: int
+    swa_capacity_bytes: int
+
+    def open(self, config: MiniConfig) -> FileKVStore:
+        return FileKVStore(
+            Path(self.path) / namespace(config.fingerprint()), self.block_capacity_bytes, self.swa_capacity_bytes
+        )
+
+
+@dataclass(frozen=True)
 class InstanceSpec:
     role: EngineType
     config: MiniConfig
     device: str = "cpu"
+    store: StoreSpec | None = None
 
 
 @dataclass
@@ -52,12 +71,13 @@ class _Engine(ServingLLMEngine):
     def __init__(self, spec: InstanceSpec, controller: InstanceController) -> None:
         self._controller = controller
         sink = controller.on_handoff if spec.role == EngineType.PROMPT else None
-        super().__init__(spec.config, spec.role, spec.device, handoff_sink=sink)
+        store = spec.store.open(spec.config) if spec.store is not None else None
+        super().__init__(spec.config, spec.role, spec.device, store=store, handoff_sink=sink)
 
     def post_schedule(self, scheduler_outputs: SchedulerOutputs) -> None:
         if scheduler_outputs.prompt_run:
             for seq in scheduler_outputs.scheduled_seqs:
-                self._controller.on_prefill_scheduled(seq.request_id)
+                self._controller.on_prefill_scheduled(seq)
 
 
 class InstanceController:
@@ -89,10 +109,13 @@ class InstanceController:
             {"type": "terminal", "rid": rid, "state": state, "reason": reason, "num_output_tokens": num_output_tokens}
         )
 
-    def on_prefill_scheduled(self, rid: str) -> None:
+    def on_prefill_scheduled(self, seq: Sequence) -> None:
+        """Reported once, at the first chunk, so ``num_cached_tokens`` is still where the cache hit resumes."""
+        rid = seq.request_id
         if rid not in self._prefill_reported:
             self._prefill_reported.add(rid)
-            self._emit({"type": "prefilling", "rid": rid})
+            hit = [seq.cached_hit_tokens, seq.num_cached_tokens, seq.swa_valid_start]
+            self._emit({"type": "prefilling", "rid": rid, "hit": hit})
 
     def on_handoff(self, handoff: Handoff) -> None:
         """PROMPT engine sink. The bytes are an owned copy, so the engine frees device memory next (ADR 0005)."""

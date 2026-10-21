@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,7 +13,9 @@ import torch
 from deepinfer_serving.engine.config import MiniConfig
 from deepinfer_serving.engine.engine_type import EngineType
 from deepinfer_serving.engine.llm_engine import LLMEngine
+from deepinfer_serving.file_store import FileKVStore
 from deepinfer_serving.handoff import Handoff
+from deepinfer_serving.kvstore import InMemoryKVStore, block_hashes
 from deepinfer_serving.pd.coordinator import PDCoordinator
 from deepinfer_serving.pd.instance import InstanceSpec
 from deepinfer_serving.serving_engine import ServingLLMEngine
@@ -22,6 +25,41 @@ DEFAULT = MiniConfig()
 
 CONFIGS = [pytest.param(SMALL, id="small"), pytest.param(DEFAULT, id="default")]
 DEVICES = [pytest.param("cpu", id="cpu"), pytest.param("cuda", id="cuda", marks=pytest.mark.gpu)]
+
+
+BACKENDS = ["memory", "file"]
+UNBOUNDED = 1 << 40
+
+Store = InMemoryKVStore | FileKVStore
+
+
+def open_store(
+    backend: str, path: Path, block_capacity_bytes: int = UNBOUNDED, swa_capacity_bytes: int = UNBOUNDED
+) -> Store:
+    """A store for ``backend``; ``path`` is used only by file-backed ones."""
+    if backend == "memory":
+        return InMemoryKVStore(block_capacity_bytes, swa_capacity_bytes)
+    return FileKVStore(path, block_capacity_bytes, swa_capacity_bytes)
+
+
+def store_keys(n: int) -> list[bytes]:
+    return block_hashes(list(range(n * 4)), 4)
+
+
+def store_tensor(seed: int) -> torch.Tensor:
+    return torch.randn((2, 2, 4, 2, 8), generator=torch.Generator().manual_seed(seed))
+
+
+def store_writer(path: str, block_capacity_bytes: int, seed: int) -> None:
+    """Spawned by the concurrency test: write 40 shared keys in a random order, checking every read."""
+    store = FileKVStore(path, block_capacity_bytes, UNBOUNDED)
+    keys = store_keys(40)
+    order = np.random.default_rng(seed).permutation(len(keys))
+    for i in order:
+        store.put_block(keys[i], store_tensor(int(i)))
+        for j in order[:5]:
+            got = store.get_block(keys[j])
+            assert got is None or torch.equal(got, store_tensor(int(j)))
 
 
 def chunked(config: MiniConfig, max_num_batched_tokens: int) -> MiniConfig:
@@ -83,6 +121,28 @@ def run_pd(
 
 def noise_like(t: torch.Tensor) -> torch.Tensor:
     return torch.randn(t.shape, generator=torch.Generator().manual_seed(123))
+
+
+# ---- store (milestone 3) ----
+
+
+def turn1(config: MiniConfig, device: str, store: Store) -> list[int]:
+    """Prompt 3G+2, reply G+4. Persists the prefill record at 3G and the decode record at 4G. Returns turn 2."""
+    g = config.grain
+    prompt = tokens(3 * g + 2, seed=10)
+    engine = ServingLLMEngine(config, EngineType.NORMAL, device, store=store)
+    engine.add_request("u", "t1", greedy(g + 4), np.asarray(prompt, dtype=np.int32))
+    reply = run(engine)["t1"]
+    assert store.swa_positions() == {3 * g, 4 * g}
+    assert len(store.block_keys()) == 4  # full blocks of [0, 4G + 5)
+    new_user = tokens(config.window + config.backtrack + 3, seed=11)
+    return prompt + reply + new_user
+
+
+def drop_swa(store: Store, positions: set[int]) -> None:
+    for key, position in store.swa_entries():
+        if position in positions:
+            store.discard_swa(key, position)
 
 
 # ---- cross-process PD (milestone 2) ----

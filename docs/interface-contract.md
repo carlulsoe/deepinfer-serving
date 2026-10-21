@@ -301,7 +301,13 @@ class KVStore(Protocol):
   `h_i = sha256(h_{i-1} ‖ int32 bytes of tokens[i*bs:(i+1)*bs])`. A key identifies the whole prefix.
 - SWA records are keyed by the chain hash of the block ending at `position`. The position is
   explicit so the store can check that it is grain-aligned.
-- `InMemoryKVStore`: two dicts. Both engines in a PD pair share one instance in tests.
+- `InMemoryKVStore(block_capacity_bytes=None, swa_capacity_bytes=None)`: both tiers in host RAM,
+  each LRU-evicted under its capacity. Both engines in an in-process PD pair share one instance in tests.
+- `FileKVStore(path, block_capacity_bytes, swa_capacity_bytes)` (`file_store.py`, milestone 3): block
+  tier as checksummed files under `path`, shared by every process that opens it; SWA tier in this
+  process's RAM. A damaged file is a miss. See [ADR 0010](decisions/0010-store-backends-and-eviction.md).
+- Both also expose `block_keys`, `discard_block`, `swa_entries`, `discard_swa`, `swa_positions` and
+  `*_bytes_used` for eviction and tests. They are not part of the protocol.
 - `compute_hit(store, token_ids, *, block_size, window, backtrack) -> Hit`: implements the hit rule
   (§10.3) using `has_*` only.
 
@@ -323,7 +329,8 @@ In every case blocks `[0, L1)` are loaded and `kv_reuse_tokens = L1`.
 resumes), `swa_valid_start`, the block keys, and the record position; it holds no tensors.
 `ServingLLMEngine.add_request` applies it through `enqueue=False` → `try_allocate_seq` → fetch and
 load → set fields → `scheduler.add_sequence`. That uses only upstream-exposed operations. If
-allocation fails or a block has disappeared since the match, the request is served cold.
+allocation fails, or a block or SWA record has disappeared or fails its checksum since the match, the
+request is served cold.
 
 Step 5 is exact in mini because suffix queries at `>= L1` only see SWA keys at `>= L1 - W + 1 > L1 - G`
 (when `W <= G`), which the replay rebuilt exactly (§8). The truncated-window positions
@@ -396,8 +403,14 @@ Step 5 is exact in mini because suffix queries at `>= L1` only see SWA keys at `
    decode snapshots exactly at grain crossings, record at finish.
 5. **Negative**: corrupting the handoff's SWA state or block KV, or a stored block or SWA record,
    changes the output.
+6. **Store loss** (milestone 3): deleting blocks or records between turns, evicting under a small
+   capacity, damaging a block file, or losing an entry between match and fetch shortens the hit and
+   leaves the output equal to cold.
+7. **Restart** (milestone 3): the cache-hit oracle through prefill and decode processes sharing a
+   `FileKVStore` directory, before and after restarting both.
 
-Tests: `tests/test_oracle_pd.py`, `tests/test_oracle_cache_hit.py`, `tests/test_hit_rule.py`,
-`tests/test_persistence.py`. Everything runs with a small config (block 16, window 16, backtrack 3,
+Tests: `tests/test_oracle_pd.py`, `tests/test_oracle_cache_hit.py` (in-memory and file backends),
+`tests/test_hit_rule.py`, `tests/test_persistence.py`, `tests/test_oracle_store_loss.py`,
+`tests/test_oracle_store_restart.py`; store behaviour in `tests/test_store_conformance.py`. Everything runs with a small config (block 16, window 16, backtrack 3,
 extra 16) and at the defaults (128 / 128 / 6 / 128). The PD and cache-hit oracles also run under
-`@pytest.mark.gpu` on CUDA.
+`@pytest.mark.gpu` on CUDA, as does the restart oracle.

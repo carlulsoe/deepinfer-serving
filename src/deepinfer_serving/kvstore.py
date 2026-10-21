@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 import torch
@@ -40,31 +41,99 @@ class KVStore(Protocol):
     def get_swa(self, key: BlockKey, position: int) -> torch.Tensor | None: ...
 
 
-@dataclass
+LOW_WATERMARK = 0.9
+"""When a tier exceeds its capacity, LRU eviction brings it down to this fraction of the capacity."""
+
+
+def namespace(config_fingerprint: str) -> str:
+    """Store sub-directory for one model/cache config. Block keys hash tokens only, so configs must not share."""
+    return hashlib.sha256(config_fingerprint.encode()).hexdigest()[:16]
+
+
+def _nbytes(t: torch.Tensor) -> int:
+    return t.numel() * t.element_size()
+
+
+class _LruTier[K]:
+    """Tensors in host RAM, least recently used first, evicted under a byte capacity (``None``: unbounded)."""
+
+    def __init__(self, capacity_bytes: int | None) -> None:
+        self.capacity_bytes = capacity_bytes
+        self.entries: OrderedDict[K, torch.Tensor] = OrderedDict()
+        self.used_bytes = 0
+
+    def __contains__(self, key: K) -> bool:
+        return key in self.entries
+
+    def put(self, key: K, value: torch.Tensor) -> None:
+        self.discard(key)
+        value = value.detach().cpu().clone()
+        self.entries[key] = value
+        self.used_bytes += _nbytes(value)
+        if self.capacity_bytes is not None and self.used_bytes > self.capacity_bytes:
+            while self.entries and self.used_bytes > LOW_WATERMARK * self.capacity_bytes:
+                self.discard(next(iter(self.entries)))
+
+    def get(self, key: K) -> torch.Tensor | None:
+        value = self.entries.get(key)
+        if value is None:
+            return None
+        self.entries.move_to_end(key)
+        return value.clone()
+
+    def discard(self, key: K) -> None:
+        value = self.entries.pop(key, None)
+        if value is not None:
+            self.used_bytes -= _nbytes(value)
+
+
 class InMemoryKVStore:
-    blocks: dict[BlockKey, torch.Tensor] = field(default_factory=dict)
-    swa: dict[tuple[BlockKey, int], torch.Tensor] = field(default_factory=dict)
+    """Both tiers in host RAM. The SWA tier of every backend is one of these (ADR 0008, 0010)."""
+
+    def __init__(self, block_capacity_bytes: int | None = None, swa_capacity_bytes: int | None = None) -> None:
+        self._blocks: _LruTier[BlockKey] = _LruTier(block_capacity_bytes)
+        self._swa: _LruTier[tuple[BlockKey, int]] = _LruTier(swa_capacity_bytes)
 
     def has_block(self, key: BlockKey) -> bool:
-        return key in self.blocks
+        return key in self._blocks
 
     def put_block(self, key: BlockKey, kv: torch.Tensor) -> None:
-        self.blocks[key] = kv.detach().cpu().clone()
+        self._blocks.put(key, kv)
 
     def get_block(self, key: BlockKey) -> torch.Tensor | None:
-        return self.blocks.get(key)
+        return self._blocks.get(key)
 
     def has_swa(self, key: BlockKey, position: int) -> bool:
-        return (key, position) in self.swa
+        return (key, position) in self._swa
 
     def put_swa(self, key: BlockKey, position: int, state: torch.Tensor) -> None:
-        self.swa[(key, position)] = state.detach().cpu().clone()
+        self._swa.put((key, position), state)
 
     def get_swa(self, key: BlockKey, position: int) -> torch.Tensor | None:
-        return self.swa.get((key, position))
+        return self._swa.get((key, position))
+
+    # ---- administration (eviction, tests); not part of the KVStore protocol ----
+
+    def block_keys(self) -> list[BlockKey]:
+        return list(self._blocks.entries)
+
+    def discard_block(self, key: BlockKey) -> None:
+        self._blocks.discard(key)
+
+    def swa_entries(self) -> list[tuple[BlockKey, int]]:
+        return list(self._swa.entries)
+
+    def discard_swa(self, key: BlockKey, position: int) -> None:
+        self._swa.discard((key, position))
 
     def swa_positions(self) -> set[int]:
-        return {pos for _, pos in self.swa}
+        return {pos for _, pos in self._swa.entries}
+
+    def block_bytes_used(self) -> int:
+        return self._blocks.used_bytes
+
+    def swa_bytes_used(self) -> int:
+        return self._swa.used_bytes
 
 
 @dataclass(frozen=True)

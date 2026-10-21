@@ -88,7 +88,9 @@ class ServingLLMEngine(LLMEngine):
         else:
             key = swa_key(hit.block_keys, hit.swa_position, self.config.grain)
             record = self.store.get_swa(key, hit.swa_position)
-            assert record is not None
+            if record is None:
+                self.scheduler.free_seq(seq)  # evicted between match and fetch; serve cold
+                return
             self.cache_engine.load_swa_record(seq.state_id, record, hit.swa_position)
         seq.num_cached_tokens = hit.num_cached_tokens
         seq.cached_hit_tokens = hit.cached_hit_tokens

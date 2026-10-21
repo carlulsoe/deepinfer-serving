@@ -83,7 +83,7 @@ aborts, corruption of header and payload), `test_pd_backpressure.py` (a full dec
 the prefill instance retries), `test_wire.py`, and a CPU → CUDA smoke test (ADR 0009). The transport
 is a `multiprocessing` socket pair carrying raw frames; no pickle on any link.
 
-### Milestone 3: the store, with a local-NVMe backend
+### Milestone 3: the store, with a local-NVMe backend (done)
 
 A persistent block tier on local NVMe and an SWA tier in host RAM, behind the existing `KVStore`
 protocol, with LRU eviction under a watermark. 3FS is an optional backend behind the same protocol,
@@ -96,6 +96,15 @@ not a dependency.
   process.
 - Eviction and lost blocks make hits shorter, never outputs wrong. This is checked by deleting
   blocks and SWA records between turns and re-running the oracle.
+
+**Status:** done (2026-10-21), except 3FS, which was not available to test. Decisions in
+[ADR 0010](decisions/0010-store-backends-and-eviction.md). `FileKVStore` holds the block tier as
+checksummed files in a shared directory; the SWA tier is LRU-bounded host RAM per process. Tests:
+`test_store_conformance.py` (in-memory and file; a 3FS case runs when `DEEPINFER_SERVING_3FS_PATH`
+points at a mount), the cache-hit oracle on both backends, `test_oracle_store_loss.py`, and
+`test_oracle_store_restart.py` (prefill and decode processes, before and after restarting both;
+small and default configs, CPU and CUDA). After a restart the SWA tier is empty, so the hit backs off
+one block, as ADR 0008 predicts.
 
 ### Milestone 4: Entrypoint and index
 

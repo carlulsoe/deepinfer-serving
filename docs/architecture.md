@@ -72,7 +72,8 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
   The `has_*` methods let matching run on metadata only. Backends: in-memory
   (tests), local NVMe (development and one-node deployments), 3FS (optional, production). Separate
   processes share the block tier through the filesystem, not a store server; the SWA tier stays
-  producer-local ([ADR 0008](decisions/0008-store-across-processes.md)).
+  producer-local ([ADR 0008](decisions/0008-store-across-processes.md)). Format, atomic writes and LRU
+  eviction under a watermark: [ADR 0010](decisions/0010-store-backends-and-eviction.md).
 - Later: an async fetcher (store → host buffer) and a layer-wise swap-in thread, kept behind the
   same protocol. The layout is block-granular so a DualPath-style second load path can be added
   later without changing callers.
@@ -286,6 +287,7 @@ Milestone 1 fixes the first modules (contract §1):
 src/deepinfer_serving/
   engine/            mini-DeepInfer (mirrors upstream; no serving imports)
   kvstore.py         KV store protocol, in-memory store, hash chain, hit rule
+  file_store.py      file-backed block tier for local NVMe or a 3FS mount (milestone 3)
   handoff.py         PROMPT → COMPLETION handoff
   serving_engine.py  LLMEngine subclass implementing the hooks
   wire.py            handoff wire format (milestone 2)
