@@ -1,6 +1,7 @@
 # ADR 0011: Entrypoint CHECK, the SWA directory, and SWA pulls
 
-Status: accepted
+Status: accepted. Its least-loaded routing is replaced by the balancers of
+[ADR 0015](0015-load-balancers.md); CHECK, the directory and pulls stay.
 
 ## Context
 

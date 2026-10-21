@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -167,13 +168,14 @@ def cluster(
     store: StoreSpec | None = None,
     device: str = "cpu",
     d_config: MiniConfig | None = None,
+    **entrypoint: Any,
 ) -> Entrypoint:
-    """Instances named ``prefill-<i>`` and ``decode-<j>``."""
+    """Instances named ``prefill-<i>`` and ``decode-<j>``; ``entrypoint`` goes to ``Entrypoint``."""
     specs = {f"prefill-{i}": InstanceSpec(EngineType.PROMPT, config, device, store) for i in range(n_prefill)}
     specs |= {
         f"decode-{j}": InstanceSpec(EngineType.COMPLETION, d_config or config, device, store) for j in range(n_decode)
     }
-    return Entrypoint(specs)
+    return Entrypoint(specs, **entrypoint)
 
 
 def decode_some(co: Entrypoint, decode: str, rids: list[str], n: int = 3, timeout: float = 30.0) -> None:

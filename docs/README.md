@@ -25,6 +25,9 @@ Three kinds of document, kept separate:
   - [0011](decisions/0011-entrypoint-check-and-swa-directory.md) Entrypoint CHECK, SWA directory, SWA pulls, least-loaded routing
   - [0012](decisions/0012-attempts-reroute-and-abort.md) attempts, re-routing after instance loss, Entrypoint-owned aborts
   - [0013](decisions/0013-decode-drain.md) decode drain by forwarding sequences
+  - [0014](decisions/0014-simulator-and-cost-model.md) the tier-0 simulator, its GPU-time model, and the trace format
+  - [0015](decisions/0015-load-balancers.md) load balancers as pure policy functions, in the simulator and the Entrypoint
+  - [0016](decisions/0016-autoscaler.md) the autoscaler as a pure reconcile function
 
 **How we get there**
 

@@ -193,10 +193,17 @@ balancers themselves sit outside the engine.
 
 **Interfaces.**
 
-- Pure policy functions over a telemetry snapshot, for example
-  `route_prefill(requests, engine_states, cost_model) -> assignments`, so the same code runs in the
-  simulator and in the live system.
-- A `CostModel` with `cost(q, c) -> ns`, fitted from profiling runs.
+- Pure policy functions over a telemetry snapshot in `control/balancers.py`, so the same code runs
+  in the simulator and in the live Entrypoint:
+  - `assign_buckets` (level 1);
+  - `route_prefill` (levels 2 and 3, pull-based, quota counted per rank);
+  - `route_decode` (DualPath's rule);
+  - `route_vision`.
+
+  Decisions and measured results: [ADR 0015](decisions/0015-load-balancers.md).
+- A `CostModel` (`control/cost.py`) with `cost(q, c) -> ns` and `solve_chunk` (level 4). Its defaults
+  are placeholders until it is fitted to tier-2 profiles
+  ([ADR 0014](decisions/0014-simulator-and-cost-model.md)).
 
 **Oracle.** Not determinism; routing is performance.
 
@@ -221,10 +228,12 @@ instance counts, and act:
 
 **Interfaces.**
 
-- `reconcile(spec, observed_state, telemetry) -> list[Action]`, a pure function. Actions include
-  scale up, scale down, drain and replace. The same code runs against the simulator and, later, a
-  real cluster backend (a Kubernetes operator using LeaderWorkerSet-style multi-node instances).
-  The cluster backend is out of scope for now.
+- `reconcile(spec, observed_state, telemetry) -> list[Action]` in `control/autoscaler.py`, a pure
+  function. The actions are `ScaleUp`, `Drain`, `Forward`, `Replace` (EP re-formed at the healthy
+  GPU count), `Provision` and `Release` (the warm reserve). The same code runs against the simulator
+  and, later, a real cluster backend (a Kubernetes operator using LeaderWorkerSet-style multi-node
+  instances). The cluster backend is out of scope for now. Rules and measured results:
+  [ADR 0016](decisions/0016-autoscaler.md).
 
 **Oracle.**
 
@@ -300,7 +309,8 @@ src/deepinfer_serving/
   serving_engine.py  LLMEngine subclass implementing the hooks
   wire.py            handoff wire format (milestone 2)
   pd/                instance controller, Entrypoint, link framing (milestones 2 and 4)
+  control/           tier-0 simulator, cost model, traces, load balancers, autoscaler (S1-S3)
 ```
 
-Later pieces get their own modules as they arrive: transport, Entrypoint and index, load
-balancers, simulator, autoscaler. We decide their names when we write them, not here.
+Later pieces get their own modules as they arrive (an RDMA transport, a cluster backend). We decide
+their names when we write them, not here.

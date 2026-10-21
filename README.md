@@ -39,9 +39,17 @@ cost, so routing never needs prefix affinity
 with the request state machine and abort propagation; the KV store with a shared local-NVMe block
 tier, LRU eviction, and cache hits that survive engine restarts; the Entrypoint with metadata-only
 hit computation, an SWA directory with cross-engine pulls, re-routing after instance loss, and
-decode drain. Next is milestone 5, the real DeepInfer subclass on rented SM100 hardware, which needs
-approval for each rental; the simulator, balancers and autoscaler can proceed on CPU meanwhile. See
-[docs/roadmap.md](docs/roadmap.md).
+decode drain.
+
+**Control plane (done on tier 0):**
+
+- a discrete-event simulator with a placeholder GPU-time model;
+- the prefill, decode and vision load balancers, which beat round-robin and prefix affinity in the
+  simulator and route the live Entrypoint;
+- an autoscaler that beats static fleets on SLO attainment per GPU-hour on a bursty trace.
+
+Next is milestone 5, the real DeepInfer subclass on rented SM100 hardware, which needs approval for
+each rental. It also calibrates the simulator's cost model. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Docs
 

@@ -1,5 +1,5 @@
-"""Entrypoint: owns each request's state and token stream, computes hits (CHECK), keeps the SWA directory, routes,
-and recovers from instance loss and decode drains (ADR 0006, 0011-0013).
+"""Entrypoint: owns each request's state and token stream, computes hits (CHECK), keeps the SWA directory, routes
+through the load balancers, and recovers from instance loss and decode drains (ADR 0006, 0011-0013, 0015).
 
 It runs in the caller's process and drives any number of prefill (PROMPT) and decode (COMPLETION) instances.
 """
@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import math
 import multiprocessing as mp
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection, wait
 from typing import Any
 
+from deepinfer_serving.control.balancers import DecodeRank, PrefillGroup, route_decode, route_prefill
+from deepinfer_serving.control.cost import CostModel
 from deepinfer_serving.engine.engine_type import EngineType
 from deepinfer_serving.engine.sampling_params import SamplingParams
 from deepinfer_serving.file_store import FileKVStore
-from deepinfer_serving.kvstore import BlockKey, compute_hit
+from deepinfer_serving.kvstore import BlockKey, Hit, compute_hit
 from deepinfer_serving.pd.instance import InstanceSpec, instance_main
 from deepinfer_serving.pd.protocol import recv_msg, send_msg
 
@@ -81,6 +84,8 @@ class Attempt:
     """Decode instance that holds, or is about to receive, the sequence."""
     source: str | None = None
     """While forwarded: the draining decode instance that still holds the bytes."""
+    cost_ns: float = 0.0
+    """Predicted prefill time (the prefill LB's quota) of what this attempt computes."""
     progress: Progress = (0, 0)
     path: set[str] = field(default_factory=set)
     """Every instance that has held this attempt: where its events, and an abort, can still go."""
@@ -94,6 +99,7 @@ class RequestRecord:
     prompt: list[int]
     sampling_params: dict
     user_id: str
+    submitted_at: float = field(default_factory=time.monotonic)
     state: RequestState = RequestState.QUEUED
     history: list[RequestState] = field(default_factory=lambda: [RequestState.QUEUED])
     tokens_by_index: dict[int, int] = field(default_factory=dict)
@@ -124,8 +130,9 @@ class RequestRecord:
         return self.state.terminal
 
     def depends_on(self) -> set[str]:
-        """Instances whose loss would strand the current attempt."""
-        if not self.attempts:
+        """Instances whose loss would strand the current attempt. None while it waits for a route: the request has
+        no attempt yet, or its latest was aborted by a re-route."""
+        if not self.attempts or self.attempt.aborted:
             return set()
         a = self.attempt
         if self.state in (_S.QUEUED, _S.PREFILLING, _S.HANDED_OFF):
@@ -139,11 +146,6 @@ class RequestRecord:
 
 class InstanceFailed(RuntimeError):
     pass
-
-
-def least_loaded(candidates: Iterable[str], load: Callable[[str], int]) -> str:
-    """Trivial balancer: fewest outstanding requests, ties broken by name."""
-    return min(sorted(candidates), key=load)
 
 
 class _DirectoryView:
@@ -161,7 +163,17 @@ class _DirectoryView:
 
 
 class Entrypoint:
-    def __init__(self, instances: dict[str, InstanceSpec], *, startup_timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        instances: dict[str, InstanceSpec],
+        *,
+        startup_timeout: float = 120.0,
+        cost: CostModel | None = None,
+        pull_limit_ns: float = math.inf,
+    ) -> None:
+        """``cost`` and ``pull_limit_ns`` configure the prefill LB (ADR 0015). Each instance is one DP group of one
+        rank. With no pull limit every request is routed on arrival; with one, requests wait here until a prefill
+        instance has quota left."""
         self.specs = dict(instances)
         self.prefills = [n for n, s in self.specs.items() if s.role == EngineType.PROMPT]
         self.decodes = [n for n, s in self.specs.items() if s.role == EngineType.COMPLETION]
@@ -175,6 +187,10 @@ class Entrypoint:
         self.config = first.config
         self.index = first.store.open(self.config) if first.store is not None else None
         self.startup_timeout = startup_timeout
+        self.cost = cost or CostModel()
+        self.pull_limit_ns = pull_limit_ns
+        self.pending: list[tuple[RequestRecord, str | None, str | None]] = []
+        """Requests waiting for a route, oldest first, with the instances a test pinned them to."""
         self.requests: dict[str, RequestRecord] = {}
         self.directory: dict[tuple[BlockKey, int], set[str]] = {}
         self.errors: list[str] = []
@@ -265,7 +281,9 @@ class Entrypoint:
             return
         self._transition(record, _S.ABORTED, "entrypoint")
         record.reason = "abort"
-        self._abort_attempt(record.attempt)
+        self.pending = [e for e in self.pending if e[0] is not record]
+        if record.attempts and not record.attempt.aborted:
+            self._abort_attempt(record.attempt)
 
     def _abort_attempt(self, attempt: Attempt) -> None:
         attempt.aborted = True
@@ -281,13 +299,73 @@ class Entrypoint:
             record.num_output_tokens = len(done)
             self._transition(record, _S.FINISHED, "entrypoint")
             return
-        prefill = prefill or least_loaded(self._routable(self.prefills), self._load)
-        decode = decode or least_loaded(self._routable(self.decodes), self._load)
-        attempt = Attempt(f"{record.request_id}/{len(record.attempts)}", len(done), prefill, decode)
+        self.pending.append((record, prefill, decode))
+        self._dispatch()
+
+    def _dispatch(self) -> None:
+        """Route waiting requests: CHECK each one, then the prefill LB (levels 2 and 3) and the decode LB (ADR 0015).
+
+        A request pinned to a prefill instance skips the prefill LB. Requests stay waiting, in order, while no
+        prefill instance has quota left."""
+        prefills = self._routable(self.prefills)
+        decodes = self._routable(self.decodes)
+        if not self.pending or not prefills or not decodes:
+            return
+        checked = {}
+        for record, _, _ in self.pending:
+            prompt = record.prompt + record.contiguous_tokens()
+            hit = self._hit(prompt)
+            c = hit.num_cached_tokens if hit else 0
+            checked[record.request_id] = (prompt, hit, self.cost.cost(len(prompt) - c, c))
+        groups = [PrefillGroup(n, 0, (self._prefill_quota(n),)) for n in prefills]
+        queue = [(r.request_id, checked[r.request_id][2]) for r, p, _ in self.pending if p is None]
+        routes = {rid: name for rid, name, _ in route_prefill({0: queue}, groups, self.pull_limit_ns)}
+        launched = set()
+        for record, pin_p, pin_d in self.pending:
+            prefill = pin_p or routes.get(record.request_id)
+            if prefill is None:
+                break
+            prompt, hit, cost = checked[record.request_id]
+            decode = pin_d or self._route_decode(decodes, len(prompt))
+            self._launch(record, prompt, hit, cost, prefill, decode)
+            launched.add(record.request_id)
+        self.pending = [e for e in self.pending if e[0].request_id not in launched]
+
+    def _route_decode(self, decodes: list[str], need: int) -> str:
+        """The decode LB. When no instance has room it picks the one with the fewest tokens, and the instance's own
+        admission decides (nack and retry, ADR 0005; or failure, for a request that can never fit)."""
+        capacity = self.config.num_gpu_blocks * self.config.block_size
+        ranks = []
+        for name in decodes:
+            mine = [r for r in self.requests.values() if not r.state.terminal and r.attempts]
+            mine = [r for r in mine if not r.attempt.aborted and r.attempt.decode == name]
+            used = sum(len(r.prompt) + len(r.tokens_by_index) for r in mine)
+            ranks.append(DecodeRank(name, len(mine), used, capacity - used))
+        (choice,) = route_decode(ranks, [need])
+        if choice is None:
+            choice = min(range(len(ranks)), key=lambda i: (ranks[i].tokens, i))
+        return decodes[choice]
+
+    def _prefill_quota(self, name: str) -> float:
+        """Predicted prefill time queued on ``name``: attempts routed there that have not handed off."""
+        return sum(
+            r.attempt.cost_ns
+            for r in self.requests.values()
+            if r.state in (_S.QUEUED, _S.PREFILLING)
+            and r.attempts
+            and not r.attempt.aborted
+            and r.attempt.prefill == name
+        )
+
+    def _launch(
+        self, record: RequestRecord, prompt: list[int], hit: Hit | None, cost: float, prefill: str, decode: str
+    ) -> None:
+        done = record.contiguous_tokens()
+        params = SamplingParams(**record.sampling_params)
+        attempt = Attempt(f"{record.request_id}/{len(record.attempts)}", len(done), prefill, decode, cost_ns=cost)
         attempt.path = {prefill, decode}
         record.attempts.append(attempt)
-        prompt = record.prompt + done
-        hit, holder = self._check(prompt, prefill)
+        plan, holder = self._plan(hit, prefill)
         msg = {
             "type": "add",
             "rid": attempt.rid,
@@ -295,27 +373,27 @@ class Entrypoint:
             "prompt": prompt,
             "sampling_params": {**record.sampling_params, "max_tokens": params.max_tokens - len(done)},
             "decode": decode,
-            "hit": hit,
+            "hit": plan,
             "swa_holder": holder,
         }
         self._send(prefill, msg)
 
     def _routable(self, names: list[str]) -> list[str]:
-        out = [n for n in names if n in self.live and n not in self.draining]
-        if not out:
-            raise InstanceFailed(f"no live instance among {names}")
-        return out
+        return [n for n in names if n in self.live and n not in self.draining]
 
-    def _load(self, name: str) -> int:
-        return sum(1 for r in self.requests.values() if not r.state.terminal and name in r.depends_on())
-
-    def _check(self, prompt: list[int], prefill: str) -> tuple[dict[str, Any] | None, str | None]:
-        """CHECK (architecture piece 2): the hit from metadata only, and who holds the SWA record it needs."""
+    def _hit(self, prompt: list[int]) -> Hit | None:
+        """CHECK (architecture piece 2): the hit from metadata only."""
         if self.index is None:
-            return None, None
+            return None
         c = self.config
         view = _DirectoryView(self.index, self.directory)
-        hit = compute_hit(view, prompt, block_size=c.block_size, window=c.window, backtrack=c.backtrack)
+        return compute_hit(view, prompt, block_size=c.block_size, window=c.window, backtrack=c.backtrack)
+
+    def _plan(self, hit: Hit | None, prefill: str) -> tuple[dict[str, Any] | None, str | None]:
+        """The hit as sent to ``prefill``, and who holds the SWA record it needs, preferring ``prefill``."""
+        if hit is None:
+            return None, None
+        c = self.config
         holder = None
         if hit.swa_position is not None:
             key = hit.block_keys[hit.swa_position // c.grain - 1]
@@ -410,6 +488,7 @@ class Entrypoint:
                     self._handle(name, recv_msg(conn))
             except (EOFError, OSError):
                 self._on_death(name)
+        self._dispatch()  # progress frees quota and decode room
 
     def wait_for(self, predicate: Callable[[], bool], timeout: float = 60.0) -> None:
         deadline = time.monotonic() + timeout

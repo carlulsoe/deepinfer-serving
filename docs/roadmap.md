@@ -123,8 +123,8 @@ decode engines on one box.
 - A decode drain forwards in-flight requests and KV, and the forwarded requests match
   uninterrupted runs.
 
-**Status:** done (2026-10-21) with the trivial balancer (least-loaded); the tier-0 balancers join
-when they exist. Decisions in ADRs 0011–0013. `pd/entrypoint.py` replaces milestone 2's
+**Status:** done (2026-10-21) with the trivial balancer (least-loaded); the tier-0 balancers replaced it
+on 2026-10-22 (ADR 0015). Decisions in ADRs 0011–0013. `pd/entrypoint.py` replaces milestone 2's
 `PDCoordinator`. Tests, all with two prefill and two decode instances unless noted:
 
 - `test_entrypoint_routing.py`: four turns alternating instances equal cold; the same hit on either
@@ -163,14 +163,42 @@ prefill and by batch size and total KV for decode, plus instance failure and sta
 *Done when* it reproduces simple analytical cases (single queue, uniform load) and reads a trace
 format we can also generate from tier-1 runs.
 
+*Status:* done (2026-10-22), [ADR 0014](decisions/0014-simulator-and-cost-model.md).
+`control/sim.py`, `control/cost.py`, `control/trace.py`. `tests/test_sim.py` covers:
+
+- M/D/1 within 3%;
+- uniform load without queueing;
+- overload growth;
+- chunking and decode step times;
+- exact re-route timing.
+
+`tests/test_entrypoint_balancers.py` turns a tier-1 run into a trace and replays it. The cost
+model's defaults are placeholders that reproduce DeepSeek's reported per-GPU figures.
+
 **S2: load balancers.** Prefill LB (four levels), Decode LB, Vision LB as pure policy functions.
 *Done when* the invariants hold on all traces, and on the reference traces each balancer beats
 round-robin and a prefix-affinity baseline on the balance metric and on TTFT and TBT percentiles.
 Results are reported as a ratio to a perfectly balanced bound.
 
+*Status:* done (2026-10-22), [ADR 0015](decisions/0015-load-balancers.md). `control/balancers.py`.
+On two mixed traces, a decode-heavy one and a vision-heavy one (`tests/test_balancers.py`):
+
+- **Prefill and decode:** better than both baselines on balance, TTFT and TBT percentiles.
+- **Vision:** better than affinity everywhere, and better than round-robin in the tail; tied at the
+  median.
+
+Invariants hold on every trace, including one with failures. The Entrypoint routes through the same
+functions, and the tier-1 oracles pass with them in the path.
+
 **S3: autoscaler.** `reconcile()` with scaling signals, rate limits, bounds, warm reserve, the
 0.8 no-scale-down rule, drain and replace. *Done when* the invariants hold under bursty and failure
 traces, and SLO attainment against GPU-hours is reported against a static allocation.
+
+*Status:* done (2026-10-22), [ADR 0016](decisions/0016-autoscaler.md). `control/autoscaler.py`.
+On a bursty trace the autoscaler reaches 0.91 SLO attainment at 3.97 GPU-hours. A static fleet at
+3.90 GPU-hours reaches 0.79, and the smallest static fleet that reaches 0.96 costs 5.84
+(`tests/test_autoscaler.py`). The live Entrypoint does not run `reconcile` yet: it can drain and
+retire instances but not start them.
 
 The balancers and the autoscaler move onto real engines at milestone 4 (one box, tier 1) and
 milestone 5 (tier 2). They stay correctness-only on tier 1.
