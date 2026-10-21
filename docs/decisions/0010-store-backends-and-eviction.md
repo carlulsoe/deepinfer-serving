@@ -27,8 +27,9 @@ read each other's blocks.
 
 **One file per block key, written atomically.** The writer writes a temp file in the same directory
 and `os.replace`s it onto the key's name. A reader sees the old file, the new one, or none. The file
-carries the key and a SHA-256 over key, header and payload:
-`"DISB" | version | key | sha256 | header_len | JSON {dtype, shape} | float32 payload`. No pickle.
+carries the key and a SHA-256 over every field after the version (`header_len`, key, header,
+payload): `"DISB" | version | key | sha256 | header_len | JSON {dtype, shape} | float32 payload`.
+No pickle.
 
 **Damage is a miss.** `get_block` returns `None` and deletes the file if it is truncated, fails the
 checksum, or holds another key. The engine already serves a request cold when a block or record

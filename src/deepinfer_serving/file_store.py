@@ -2,7 +2,8 @@
 
 Every process on a host opens the same directory; there is no store server. One file per block key:
 
-``magic "DISB" | version u16 | key 32B | sha256(key | header | payload) 32B | header_len u32 | header JSON | payload``
+``magic "DISB" | version u16 | key 32B | digest 32B | header_len u32 | header JSON | payload``, where
+``digest = sha256(header_len | key | header | payload)`` covers every field after the version.
 
 A file that fails any check is a miss and is deleted, so damage on disk shortens hits instead of changing outputs.
 """
@@ -140,8 +141,11 @@ def _encode(key: BlockKey, kv: torch.Tensor) -> bytes:
         raise ValueError(f"unsupported dtype {tensor.dtype}")
     payload = tensor.numpy().astype("<f4", copy=False).tobytes()
     header = json.dumps({"dtype": "float32", "shape": list(tensor.shape)}, separators=(",", ":")).encode()
-    digest = hashlib.sha256(key + header + payload).digest()
-    return _PREFIX.pack(MAGIC, VERSION, key, digest, len(header)) + header + payload
+    return _PREFIX.pack(MAGIC, VERSION, key, _digest(key, header, payload), len(header)) + header + payload
+
+
+def _digest(key: BlockKey, header: bytes, payload: bytes) -> bytes:
+    return hashlib.sha256(struct.pack("<I", len(header)) + key + header + payload).digest()
 
 
 def _decode(key: BlockKey, data: bytes) -> torch.Tensor | None:
@@ -152,11 +156,16 @@ def _decode(key: BlockKey, data: bytes) -> torch.Tensor | None:
     if magic != MAGIC or version != VERSION or file_key != key:
         return None
     header_end = _PREFIX.size + header_len
+    if header_end > len(data):
+        return None
     header, payload = data[_PREFIX.size : header_end], data[header_end:]
-    if hashlib.sha256(key + header + payload).digest() != digest:
+    if _digest(key, header, payload) != digest:
         return None
-    meta = json.loads(header)
-    shape = meta["shape"]
-    if meta["dtype"] != "float32" or int(np.prod(shape, dtype=np.int64)) * 4 != len(payload):
+    try:  # unreachable for files this module wrote; a miss rather than a crash if the digest is ever fooled
+        meta = json.loads(header)
+        shape = [int(d) for d in meta["shape"]]
+        if meta["dtype"] != "float32" or int(np.prod(shape, dtype=np.int64)) * 4 != len(payload):
+            return None
+        return torch.from_numpy(np.frombuffer(payload, dtype="<f4").reshape(shape).copy())
+    except (ValueError, KeyError, TypeError):
         return None
-    return torch.from_numpy(np.frombuffer(payload, dtype="<f4").reshape(shape).copy())

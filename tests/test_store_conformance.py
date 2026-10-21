@@ -5,6 +5,7 @@ The 3FS case is the file backend on a 3FS mount; it runs only when ``DEEPINFER_S
 
 import multiprocessing as mp
 import os
+import struct
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -150,6 +151,10 @@ def _damage(path: Path, how: str) -> None:
     data = bytearray(path.read_bytes())
     if how == "flip_prefix":
         data[10] ^= 0x10
+    elif how in ("header_len_up", "header_len_down"):
+        offset = _PREFIX.size - 4  # header_len: moves the header/payload boundary, keeping the bytes
+        (n,) = struct.unpack_from("<I", data, offset)
+        struct.pack_into("<I", data, offset, n + (1 if how == "header_len_up" else -1))
     elif how == "flip_header":
         data[_PREFIX.size + 2] ^= 0x10
     elif how == "flip_payload":
@@ -159,7 +164,9 @@ def _damage(path: Path, how: str) -> None:
     path.write_bytes(bytes(data))
 
 
-@pytest.mark.parametrize("how", ["flip_prefix", "flip_header", "flip_payload", "truncate", "wrong_key"])
+@pytest.mark.parametrize(
+    "how", ["flip_prefix", "header_len_up", "header_len_down", "flip_header", "flip_payload", "truncate", "wrong_key"]
+)
 def test_damaged_file_is_a_miss_and_is_removed(file_make: Factory, how: str) -> None:
     store = file_make()
     assert isinstance(store, FileKVStore)
