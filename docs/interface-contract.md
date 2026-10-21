@@ -260,8 +260,8 @@ Later transports change only how it moves.
 | `request_id`, `user_id` | identity |
 | `sampling_params` | `max_tokens`, `ignore_eos`, `eos_id` |
 | `prompt_len` | to split `token_ids` into prompt and output |
-| `token_ids` | prompt + the first token sampled by the PROMPT engine |
-| `num_cached_tokens` | `= prompt_len` (the first sampled token has no KV yet) |
+| `token_ids` | prompt + every token sampled so far: one after prefill, more for a drain forward (ADR 0013) |
+| `num_cached_tokens` | `= len(token_ids) - 1` (the last sampled token has no KV yet); `= prompt_len` after prefill |
 | `block_kv` | `[ceil(num_cached_tokens / block_size), n_full_layers, 2, block_size, n_heads, head_dim]`, the sequence's blocks in table order |
 | `swa_state` | SWA state record at `num_cached_tokens` (inference window, §7) |
 | `config_fingerprint` | layer pattern, dims, block/window/backtrack. The receiver rejects a mismatch |
@@ -273,7 +273,8 @@ without them.
 PROMPT side: `send_processed_prompts()` builds a handoff for every sequence in `running` that
 finished prefill, passes it to a sink callable, and frees the sequence.
 COMPLETION side: `ServingLLMEngine.receive_handoff(h)` first runs `validate_handoff(h)`, which raises
-`ValueError` on a fingerprint mismatch, inconsistent lengths, out-of-vocab tokens, or tensor shapes that
+`ValueError` on a fingerprint mismatch, inconsistent lengths (`0 < prompt_len <= num_cached_tokens =
+len(token_ids) - 1`), out-of-vocab tokens, or tensor shapes that
 do not match this engine's layout. It then calls `add_request(..., enqueue=False)`, appends the output
 tokens, and calls `scheduler.try_allocate_seq(seq)`; if that fails it returns `None` and keeps nothing
 ([ADR 0005](decisions/0005-handoff-ownership-and-admission.md)). Otherwise it copies
@@ -282,6 +283,11 @@ blocks into the block table and the record into the slot, sets
 `seq.swa_valid_start = max(0, num_cached_tokens - window - backtrack)` (positions below the handed-off
 window were never in this slot), then calls `scheduler.add_prompted(seq)`. Note: if the first token already ends the request (EOS or
 `max_tokens = 1`), the PROMPT engine's output is final and no handoff is sent.
+
+Drain (milestone 4): `take_for_forward(rid)` builds the same handoff for an admitted, unfinished
+sequence on a COMPLETION engine between steps, removes it from `running` or `prompted`, and frees it;
+`forwardable()` lists the candidates. Like `send_processed_prompts`, it touches the scheduler queues
+directly because upstream has no hook for it ([ADR 0013](decisions/0013-decode-drain.md)).
 
 ### 10.2 KV store (`kvstore.py`)
 
@@ -308,8 +314,9 @@ class KVStore(Protocol):
   process's RAM. A damaged file is a miss. See [ADR 0010](decisions/0010-store-backends-and-eviction.md).
 - Both also expose `block_keys`, `discard_block`, `swa_entries`, `discard_swa`, `swa_positions` and
   `*_bytes_used` for eviction and tests. They are not part of the protocol.
-- `compute_hit(store, token_ids, *, block_size, window, backtrack) -> Hit`: implements the hit rule
-  (§10.3) using `has_*` only.
+- `compute_hit(index, token_ids, *, block_size, window, backtrack) -> Hit`: implements the hit rule
+  (§10.3) using `has_*` only. It takes a `KVIndex`, the presence-only half of `KVStore`, so the
+  Entrypoint can run it over metadata ([ADR 0011](decisions/0011-entrypoint-check-and-swa-directory.md)).
 
 ### 10.3 Hit rule
 
@@ -327,7 +334,8 @@ In every case blocks `[0, L1)` are loaded and `kv_reuse_tokens = L1`.
 
 `Hit` carries `cached_hit_tokens` (the hit length above), `num_cached_tokens` (where compute
 resumes), `swa_valid_start`, the block keys, and the record position; it holds no tensors.
-`ServingLLMEngine.add_request` applies it through `enqueue=False` → `try_allocate_seq` → fetch and
+`ServingLLMEngine.add_request` takes a precomputed hit (`hit=`, from the Entrypoint) or computes one
+from its store, and applies it through `enqueue=False` → `try_allocate_seq` → fetch and
 load → set fields → `scheduler.add_sequence`. That uses only upstream-exposed operations. If
 allocation fails, or a block or SWA record has disappeared or fails its checksum since the match, the
 request is served cold.

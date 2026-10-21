@@ -35,10 +35,13 @@ cost, so routing never needs prefix affinity
 
 ## Status
 
-**Milestones 1–3 (done):** mini-DeepInfer and the determinism oracles; cross-process handoff
+**Milestones 1–4 (done):** mini-DeepInfer and the determinism oracles; cross-process handoff
 with the request state machine and abort propagation; the KV store with a shared local-NVMe block
-tier, LRU eviction, and cache hits that survive engine restarts. Next is milestone 4, the Entrypoint
-and index. See [docs/roadmap.md](docs/roadmap.md).
+tier, LRU eviction, and cache hits that survive engine restarts; the Entrypoint with metadata-only
+hit computation, an SWA directory with cross-engine pulls, re-routing after instance loss, and
+decode drain. Next is milestone 5, the real DeepInfer subclass on rented SM100 hardware, which needs
+approval for each rental; the simulator, balancers and autoscaler can proceed on CPU meanwhile. See
+[docs/roadmap.md](docs/roadmap.md).
 
 ## Docs
 

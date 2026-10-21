@@ -55,7 +55,7 @@ class FileKVStore:
         return self._file(key).exists()
 
     def put_block(self, key: BlockKey, kv: torch.Tensor) -> None:
-        data = _encode(key, kv)
+        data = encode_tensor(key, kv)
         tmp = self.path / f"{_TMP_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
         tmp.write_bytes(data)
         os.replace(tmp, self._file(key))  # atomic: readers see the old file, the new one, or none
@@ -68,7 +68,7 @@ class FileKVStore:
             data = path.read_bytes()
         except FileNotFoundError:
             return None
-        kv = _decode(key, data)
+        kv = decode_tensor(key, data)
         if kv is None:
             path.unlink(missing_ok=True)
             return None
@@ -135,7 +135,8 @@ class FileKVStore:
         return self.swa_tier.swa_bytes_used()
 
 
-def _encode(key: BlockKey, kv: torch.Tensor) -> bytes:
+def encode_tensor(key: BlockKey, kv: torch.Tensor) -> bytes:
+    """The block file format. Also carries SWA records pulled between instances (ADR 0011)."""
     tensor = kv.detach().cpu().contiguous()
     if tensor.dtype != torch.float32:
         raise ValueError(f"unsupported dtype {tensor.dtype}")
@@ -148,7 +149,7 @@ def _digest(key: BlockKey, header: bytes, payload: bytes) -> bytes:
     return hashlib.sha256(struct.pack("<I", len(header)) + key + header + payload).digest()
 
 
-def _decode(key: BlockKey, data: bytes) -> torch.Tensor | None:
+def decode_tensor(key: BlockKey, data: bytes) -> torch.Tensor | None:
     """The tensor, or ``None`` if the file is truncated, damaged, or belongs to another key."""
     if len(data) < _PREFIX.size:
         return None

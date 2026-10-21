@@ -3,7 +3,7 @@
 import pytest
 from helpers import SMALL, assert_baseline, greedy, pd_coordinator, tokens
 
-from deepinfer_serving.pd.coordinator import RequestState
+from deepinfer_serving.pd.entrypoint import RequestState
 
 
 @pytest.mark.gpu

@@ -14,9 +14,9 @@ class Handoff:
     sampling_params: dict
     prompt_len: int
     token_ids: list[int]
-    """Prompt plus the first token sampled by the PROMPT engine."""
+    """Prompt plus every token sampled so far: one after prefill, more when a draining decode forwards it."""
     num_cached_tokens: int
-    """Equals ``prompt_len``: the first sampled token has no KV yet."""
+    """Equals ``len(token_ids) - 1``: the last sampled token has no KV yet."""
     block_kv: torch.Tensor
     """``[ceil(num_cached_tokens / block_size), n_full_layers, 2, block_size, n_heads, head_dim]``, table order."""
     swa_state: torch.Tensor

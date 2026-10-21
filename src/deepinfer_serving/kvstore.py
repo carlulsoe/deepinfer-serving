@@ -32,11 +32,16 @@ def swa_key(keys: list[BlockKey], position: int, grain: int) -> BlockKey:
     return keys[position // grain - 1]
 
 
-class KVStore(Protocol):
+class KVIndex(Protocol):
+    """Presence only. Enough for the hit rule, which matches over metadata (the Entrypoint's CHECK)."""
+
     def has_block(self, key: BlockKey) -> bool: ...
+    def has_swa(self, key: BlockKey, position: int) -> bool: ...
+
+
+class KVStore(KVIndex, Protocol):
     def put_block(self, key: BlockKey, kv: torch.Tensor) -> None: ...
     def get_block(self, key: BlockKey) -> torch.Tensor | None: ...
-    def has_swa(self, key: BlockKey, position: int) -> bool: ...
     def put_swa(self, key: BlockKey, position: int, state: torch.Tensor) -> None: ...
     def get_swa(self, key: BlockKey, position: int) -> torch.Tensor | None: ...
 
@@ -154,7 +159,7 @@ class Hit:
         return cls(0, 0, 0, [], None)
 
 
-def compute_hit(store: KVStore, token_ids: Sequence[int], *, block_size: int, window: int, backtrack: int) -> Hit:
+def compute_hit(store: KVIndex, token_ids: Sequence[int], *, block_size: int, window: int, backtrack: int) -> Hit:
     """Hit rule. Metadata-only: checks presence, does not fetch."""
     grain = block_size
     cap = len(token_ids) - (window + backtrack)

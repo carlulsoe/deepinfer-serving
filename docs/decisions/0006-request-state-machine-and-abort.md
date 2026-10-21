@@ -1,6 +1,7 @@
 # ADR 0006: Request state machine, token streaming, and abort propagation
 
-Status: accepted
+Status: accepted; the abort path is replaced by [ADR 0012](0012-attempts-reroute-and-abort.md), and
+`forwarded` is defined by [ADR 0013](0013-decode-drain.md).
 
 ## Context
 

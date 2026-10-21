@@ -6,7 +6,7 @@ import pytest
 from helpers import CONFIGS, DEVICES, assert_baseline, chunked, greedy, pd_coordinator, run_normal, tokens
 
 from deepinfer_serving.engine.config import MiniConfig
-from deepinfer_serving.pd.coordinator import PDCoordinator, RequestState
+from deepinfer_serving.pd.entrypoint import Entrypoint, RequestState
 
 _PARAMS = [
     pytest.param((c.values[0], d.values[0]), id=f"{c.id}-{d.id}", marks=d.marks) for c in CONFIGS for d in DEVICES
@@ -14,14 +14,14 @@ _PARAMS = [
 
 
 @pytest.fixture(scope="module", params=_PARAMS)
-def cluster(request: pytest.FixtureRequest) -> Iterator[tuple[MiniConfig, str, PDCoordinator]]:
+def cluster(request: pytest.FixtureRequest) -> Iterator[tuple[MiniConfig, str, Entrypoint]]:
     config, device = request.param
     # Chunked prefill on the PROMPT side; prompts below cover chunked and unchunked.
     with pd_coordinator(chunked(config, config.block_size + 3), config, device, device) as co:
         yield config, device, co
 
 
-def test_cross_process_pd_equals_normal(cluster: tuple[MiniConfig, str, PDCoordinator]) -> None:
+def test_cross_process_pd_equals_normal(cluster: tuple[MiniConfig, str, Entrypoint]) -> None:
     config, device, co = cluster
     g = config.block_size
     prompts = {

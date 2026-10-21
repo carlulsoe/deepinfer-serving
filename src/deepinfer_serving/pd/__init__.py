@@ -1,1 +1,1 @@
-"""Cross-process PD: instance controllers (one engine per process) and the request coordinator."""
+"""Cross-process serving: instance controllers (one engine per process) and the Entrypoint."""

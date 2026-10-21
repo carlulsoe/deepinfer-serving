@@ -16,8 +16,8 @@ from deepinfer_serving.engine.llm_engine import LLMEngine
 from deepinfer_serving.file_store import FileKVStore
 from deepinfer_serving.handoff import Handoff
 from deepinfer_serving.kvstore import InMemoryKVStore, block_hashes
-from deepinfer_serving.pd.coordinator import PDCoordinator
-from deepinfer_serving.pd.instance import InstanceSpec
+from deepinfer_serving.pd.entrypoint import Entrypoint, RequestState
+from deepinfer_serving.pd.instance import InstanceSpec, StoreSpec
 from deepinfer_serving.serving_engine import ServingLLMEngine
 
 SMALL = MiniConfig(block_size=16, window=16, backtrack=3, store_extra=16, num_gpu_blocks=128)
@@ -150,16 +150,51 @@ def drop_swa(store: Store, positions: set[int]) -> None:
 
 def pd_coordinator(
     p_config: MiniConfig, d_config: MiniConfig, p_device: str = "cpu", d_device: str = "cpu"
-) -> PDCoordinator:
-    return PDCoordinator(
-        InstanceSpec(EngineType.PROMPT, p_config, p_device), InstanceSpec(EngineType.COMPLETION, d_config, d_device)
+) -> Entrypoint:
+    """One prefill instance named ``prefill`` and one decode instance named ``decode``."""
+    return Entrypoint(
+        {
+            "prefill": InstanceSpec(EngineType.PROMPT, p_config, p_device),
+            "decode": InstanceSpec(EngineType.COMPLETION, d_config, d_device),
+        }
     )
 
 
-def assert_baseline(co: PDCoordinator, timeout: float = 30.0) -> None:
-    """Every request terminated exactly once, no protocol errors, and allocator counts back to baseline."""
+def cluster(
+    config: MiniConfig,
+    n_prefill: int,
+    n_decode: int,
+    store: StoreSpec | None = None,
+    device: str = "cpu",
+    d_config: MiniConfig | None = None,
+) -> Entrypoint:
+    """Instances named ``prefill-<i>`` and ``decode-<j>``."""
+    specs = {f"prefill-{i}": InstanceSpec(EngineType.PROMPT, config, device, store) for i in range(n_prefill)}
+    specs |= {
+        f"decode-{j}": InstanceSpec(EngineType.COMPLETION, d_config or config, device, store) for j in range(n_decode)
+    }
+    return Entrypoint(specs)
+
+
+def decode_some(co: Entrypoint, decode: str, rids: list[str], n: int = 3, timeout: float = 30.0) -> None:
+    """``decode`` must be paused before the requests were submitted. Step it until every request has at least
+    ``n`` tokens, and leave it paused, so no request can finish before the test acts."""
+    deadline = time.monotonic() + timeout
+    co.wait_for(lambda: all(co.requests[r].state == RequestState.HANDED_OFF for r in rids), timeout)
+    for done in (
+        lambda: all(co.requests[r].state == RequestState.DECODING for r in rids),  # admit them all first
+        lambda: all(len(co.requests[r].tokens_by_index) >= n for r in rids),
+    ):
+        while not done():
+            assert time.monotonic() < deadline, "requests did not reach the token count"
+            co.step(decode)
+            co.stats(decode)  # a round trip, so steps are not queued faster than they run
+
+
+def assert_baseline(co: Entrypoint, timeout: float = 30.0) -> None:
+    """Every request terminated exactly once, no protocol errors, and every live instance back to baseline."""
     co.run_until_done(timeout)
-    for role in co.ROLES:
+    for role in co.live:
         deadline = time.monotonic() + timeout
         while True:
             s = co.stats(role)
@@ -169,6 +204,7 @@ def assert_baseline(co: PDCoordinator, timeout: float = 30.0) -> None:
                 and s["unfinished"] == 0
                 and s["outbox"] == 0
                 and s["inbox"] == 0
+                and s["pending_pulls"] == 0
             )
             if at_baseline:
                 break

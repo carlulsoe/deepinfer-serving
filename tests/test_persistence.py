@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
-from helpers import CONFIGS, greedy, run, tokens
+from helpers import CONFIGS, greedy, run, run_normal, tokens
 
 from deepinfer_serving.engine.config import MiniConfig
 from deepinfer_serving.engine.engine_type import EngineType
@@ -78,3 +78,28 @@ def test_decode_snapshot_tolerates_small_overshoot(config: MiniConfig) -> None:
     run(engine)
     assert seq.last_copy_state_token_idx == 2 * g + 1  # overshoot 1 < backtrack
     assert store.swa_positions() == {2 * g}
+
+
+@pytest.mark.parametrize("config", CONFIGS)
+def test_forwarded_sequence_skips_records_whose_window_it_never_held(config: MiniConfig) -> None:
+    """A mid-decode handoff (drain) lands at 3G+1: the slot holds [3G+1-W-B, 3G+1), not the window of 3G."""
+    g = config.grain
+    prompt = tokens(2 * g + 5, 0)
+    max_tokens = g  # finishes at 3G + 5 tokens, so the last snapshot (taken at 3G+1) is the one stored
+    source = ServingLLMEngine(config, EngineType.NORMAL)
+    seq = source.add_request("u", "r", greedy(max_tokens), np.asarray(prompt, dtype=np.int32))
+    assert seq is not None
+    produced = []
+    while seq.num_cached_tokens < 3 * g + 1:
+        produced += [o.token_id for o in source.step()]
+    handoff = source.take_for_forward("r")
+    assert handoff is not None and handoff.num_cached_tokens == 3 * g + 1
+    assert not source.has_unfinished_requests() and source.block_manager.get_num_free_blocks() == config.num_gpu_blocks
+
+    store = InMemoryKVStore()
+    target = ServingLLMEngine(config, EngineType.COMPLETION, store=store)
+    assert target.receive_handoff(handoff) is not None
+    produced += run(target)["r"]
+    assert produced == run_normal(config, "cpu", {"r": prompt}, max_tokens)["r"]  # forwarding changes nothing
+    assert seq.last_copy_state_token_idx == 0  # the source never snapshotted; the target did, at 3G+1
+    assert store.swa_positions() == set()  # the record at 3G would include [3G-W-B, 3G+1-W-B), never in this slot

@@ -47,7 +47,10 @@ class ServingLLMEngine(LLMEngine):
         extra: dict | None = None,
         enqueue: bool = True,
         chunk_checkpoints: list[int] | None = None,
+        *,
+        hit: Hit | None = None,
     ) -> Sequence | None:
+        """``hit``: a hit computed elsewhere (the Entrypoint's CHECK). Without one, compute it from the store."""
         seq = super().add_request(
             user_id,
             request_id,
@@ -63,9 +66,10 @@ class ServingLLMEngine(LLMEngine):
             return seq
         if self.store is not None:
             c = self.config
-            hit = compute_hit(
-                self.store, seq.get_token_ids(), block_size=c.block_size, window=c.window, backtrack=c.backtrack
-            )
+            if hit is None:
+                hit = compute_hit(
+                    self.store, seq.get_token_ids(), block_size=c.block_size, window=c.window, backtrack=c.backtrack
+                )
             if hit.cached_hit_tokens > 0:
                 self._apply_hit(seq, hit)
         self.scheduler.add_sequence(seq)
@@ -178,13 +182,30 @@ class ServingLLMEngine(LLMEngine):
             config_fingerprint=self.config.fingerprint(),
         )
 
+    def forwardable(self) -> list[str]:
+        """Requests a draining COMPLETION engine can forward: admitted and not finished."""
+        sched = self.scheduler
+        return [seq.request_id for seq in [*sched.running, *sched.prompted] if not seq.is_finished()]
+
+    def take_for_forward(self, request_id: str) -> Handoff | None:
+        """Build a mid-decode handoff for ``request_id`` and free it here (decode drain, ADR 0013)."""
+        sched = self.scheduler
+        for queue in (sched.running, sched.prompted):
+            for seq in queue:
+                if seq.request_id == request_id and not seq.is_finished():
+                    handoff = self._build_handoff(seq)
+                    queue.remove(seq)
+                    sched.free_seq(seq)
+                    return handoff
+        return None
+
     def validate_handoff(self, handoff: Handoff) -> None:
         """Check a handoff against this engine's config before it touches device memory. Raises ``ValueError``."""
         c = self.config
         if handoff.config_fingerprint != c.fingerprint():
             raise ValueError("handoff was produced by an engine with a different model/cache config")
         n = handoff.num_cached_tokens
-        if not (0 < handoff.prompt_len == n < len(handoff.token_ids) <= c.max_model_len):
+        if not (0 < handoff.prompt_len <= n == len(handoff.token_ids) - 1 < c.max_model_len):
             raise ValueError("inconsistent prompt_len / num_cached_tokens / token_ids")
         if any(not 0 <= t < c.vocab_size for t in handoff.token_ids):
             raise ValueError("token id out of range")

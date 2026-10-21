@@ -106,7 +106,7 @@ points at a mount), the cache-hit oracle on both backends, `test_oracle_store_lo
 small and default configs, CPU and CUDA). After a restart the SWA tier is empty, so the hit backs off
 one block, as ADR 0008 predicts.
 
-### Milestone 4: Entrypoint and index
+### Milestone 4: Entrypoint and index (done)
 
 The Entrypoint computes hit length from metadata (CHECK role), owns the SWA directory, and routes
 requests. It first uses trivial balancers, then the tier-0 ones. Run at least two prefill and two
@@ -122,6 +122,22 @@ decode engines on one box.
   nothing leaks.
 - A decode drain forwards in-flight requests and KV, and the forwarded requests match
   uninterrupted runs.
+
+**Status:** done (2026-10-21) with the trivial balancer (least-loaded); the tier-0 balancers join
+when they exist. Decisions in ADRs 0011–0013. `pd/entrypoint.py` replaces milestone 2's
+`PDCoordinator`. Tests, all with two prefill and two decode instances unless noted:
+
+- `test_entrypoint_routing.py`: four turns alternating instances equal cold; the same hit on either
+  prefill instance; a cross-engine SWA pull; a record lost at its holder; a block lost after CHECK.
+- `test_entrypoint_failures.py`: killing a prefill or decode instance while requests are queued,
+  prefilling, in transit or decoding.
+- `test_decode_drain.py` (one prefill, two decode): drain, retire, and an abort while forwarded.
+- `test_entrypoint_ordering.py`: events read out of order across links, a link whose reader has
+  stopped, and an engine crash.
+- An in-process persistence test for forwarded sequences.
+
+Re-routing after a loss re-prefills prompt + streamed tokens (ADR 0012). That is exact in mini;
+for real DeepInfer it is unverified until milestone 5.
 
 ### Milestone 5: the real DeepInfer subclass on SM100
 

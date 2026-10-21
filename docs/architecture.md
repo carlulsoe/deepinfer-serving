@@ -84,8 +84,8 @@ This is the hardest piece. A bug here does not crash anything; it produces fluen
 - *Cache hit*: a turn served from the store equals the same turn run cold.
 - *Negative*: corrupting the handoff's SWA state or block KV, or a stored block or SWA record,
   changes the output. This proves the cache is actually used.
-- *Drain* (later): a request forwarded mid-decode finishes with the same tokens as an
-  uninterrupted run.
+- *Drain*: a request forwarded mid-decode finishes with the same tokens as an uninterrupted run
+  (`tests/test_decode_drain.py`).
 
 ### 2. KV index, Entrypoint and store service
 
@@ -109,16 +109,21 @@ through `add_request(enqueue=False)` → `try_allocate_seq` → load → set `nu
 - `compute_hit(store, token_ids, *, block_size, window, backtrack) -> Hit`: the hit rule. Cap at L − (window + backtrack); find
   the longest contiguous block prefix L1; use SWA state at L1 or L1 − 128; otherwise back off one
   block.
-- SWA directory: `locate(key, position) -> holder`, `register(...)`, `evict(...)`. Not yet
-  specified.
-- Entrypoint request API: tokens + sampling params in, token stream out. Not yet specified.
-  deepseek-recipe sits in front of it and is not ours to build.
+- `compute_hit` takes a `KVIndex` (presence only), so the Entrypoint runs it over the shared block
+  directory plus its SWA directory.
+- SWA directory: `(key, position) → holders`, built from each instance's `swa_index` reports; a
+  non-holder pulls the record over the peer link ([ADR 0011](decisions/0011-entrypoint-check-and-swa-directory.md)).
+- Entrypoint (`pd/entrypoint.py`): `submit(request_id, tokens, sampling_params)` in, a
+  `RequestRecord` with tokens by index out. deepseek-recipe sits in front of it and is not ours to
+  build. One Entrypoint for now; DeepSeek partitions the directory across several [DS].
 
 **Oracle.**
 
 - Hit-rule unit tests: the cap, grain alignment, SWA present or absent, non-contiguous blocks,
   prompts shorter than a block.
-- The cache-hit oracle run through the Entrypoint rather than a direct store call.
+- The cache-hit oracle run through the Entrypoint rather than a direct store call, including the
+  no-affinity property: the same hit whichever prefill instance served earlier turns
+  (`tests/test_entrypoint_routing.py`, `tests/test_oracle_store_restart.py`).
 - Failure cases: a lost block or a missing SWA state must make the hit shorter, never make the
   output wrong.
 
@@ -145,11 +150,12 @@ through `add_request(enqueue=False)` → `try_allocate_seq` → load → set `nu
 
 **Interfaces.** A `ServingLLMEngine(LLMEngine)` subclass, the same subclass on mini-DeepInfer and
 on real DeepInfer. An instance controller that owns one engine (or one EP group) and talks to the
-Entrypoint and the load balancers. In milestone 2 the instance controller is
-`pd/instance.py` (one process per engine) and a `PDCoordinator` (`pd/coordinator.py`) stands in for
-the Entrypoint's request tracking. The request state machine (`queued → prefilling → handed_off →
-decoding → finished | aborted | failed`, with `forwarded` reserved for drain), token ordering and
-abort propagation are specified in [ADR 0006](decisions/0006-request-state-machine-and-abort.md).
+Entrypoint and the load balancers: `pd/instance.py` (one process per engine, a link to every other
+instance) and `pd/entrypoint.py`. The request state machine (`queued → prefilling → handed_off →
+decoding (→ forwarded → decoding)* → finished | aborted | failed`) and token ordering are in
+[ADR 0006](decisions/0006-request-state-machine-and-abort.md); attempts, re-routing and
+Entrypoint-owned aborts in [ADR 0012](decisions/0012-attempts-reroute-and-abort.md); drain in
+[ADR 0013](decisions/0013-decode-drain.md).
 Handoff ownership, release and decode admission (ack/nack, retry on `no_capacity`) are in
 [ADR 0005](decisions/0005-handoff-ownership-and-admission.md).
 
@@ -158,6 +164,8 @@ Handoff ownership, release and decode admission (ack/nack, retry on `no_capacity
 - The PD oracle across processes (milestone 2: `tests/test_oracle_pd_multiprocess.py`).
 - Abort and failure tests: every request terminates exactly once; no block or state slot leaks
   (allocator counts return to baseline).
+- Instance loss: killing a prefill or decode instance mid-request re-routes; outputs still equal
+  cold runs (`tests/test_entrypoint_failures.py`).
 - The drain oracle above.
 
 ### 4. Load balancers
@@ -291,7 +299,7 @@ src/deepinfer_serving/
   handoff.py         PROMPT → COMPLETION handoff
   serving_engine.py  LLMEngine subclass implementing the hooks
   wire.py            handoff wire format (milestone 2)
-  pd/                instance controller, coordinator, link framing (milestone 2)
+  pd/                instance controller, Entrypoint, link framing (milestones 2 and 4)
 ```
 
 Later pieces get their own modules as they arrive: transport, Entrypoint and index, load

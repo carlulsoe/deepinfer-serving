@@ -6,18 +6,18 @@ from dataclasses import replace
 import pytest
 from helpers import SMALL, assert_baseline, greedy, pd_coordinator, run_normal, tokens
 
-from deepinfer_serving.pd.coordinator import PDCoordinator, RequestState
+from deepinfer_serving.pd.entrypoint import Entrypoint, RequestState
 
 D_CONFIG = replace(SMALL, num_state_slots=1)  # one sequence at a time on the decode side
 
 
 @pytest.fixture(scope="module")
-def co() -> Iterator[PDCoordinator]:
+def co() -> Iterator[Entrypoint]:
     with pd_coordinator(SMALL, D_CONFIG) as coordinator:
         yield coordinator
 
 
-def test_full_decode_nacks_and_prefill_retries(co: PDCoordinator) -> None:
+def test_full_decode_nacks_and_prefill_retries(co: Entrypoint) -> None:
     prompts = {f"b{i}": tokens(20 + 7 * i, 200 + i) for i in range(4)}
     expected = run_normal(SMALL, "cpu", prompts, 25)
     for rid, prompt in prompts.items():
@@ -28,7 +28,7 @@ def test_full_decode_nacks_and_prefill_retries(co: PDCoordinator) -> None:
     assert_baseline(co)
 
 
-def test_abort_while_waiting_for_capacity(co: PDCoordinator) -> None:
+def test_abort_while_waiting_for_capacity(co: Entrypoint) -> None:
     co.submit("hog", tokens(20, 300), greedy(200))
     co.wait_for(lambda: co.requests["hog"].state == RequestState.DECODING)
     nacks_before = co.stats("prefill")["nacks_received"]

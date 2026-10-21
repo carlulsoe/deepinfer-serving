@@ -1,10 +1,10 @@
 """Cache-hit oracle across processes and restarts: PD instances share the block tier through a directory.
 
 Turn 1 runs through a prefill and a decode process. The prefill process stores blocks 0-2 and its record at
-3G; the decode process stores block 3 (and its record at 4G in its own RAM, ADR 0008).
+3G; the decode process stores block 3 and keeps its record at 4G in its own RAM (ADR 0008).
 
-- Same processes, turn 2: L1 = 4G needs the decode process's block from disk; the prefill process holds
-  the record at 3G, not 4G, so it resumes at 3G.
+- Same processes, turn 2: L1 = 4G needs the decode process's block from disk, and the record at 4G is pulled
+  from the decode process through the Entrypoint's SWA directory (ADR 0011).
 - After restarting both processes, turn 2: blocks survive on disk, the SWA tier does not, so the hit backs
   off to 3G with a zeroed slot.
 
@@ -18,7 +18,8 @@ from helpers import CONFIGS, DEVICES, UNBOUNDED, assert_baseline, greedy, run_no
 
 from deepinfer_serving.engine.config import MiniConfig
 from deepinfer_serving.engine.engine_type import EngineType
-from deepinfer_serving.pd.coordinator import PDCoordinator
+from deepinfer_serving.kvstore import block_hashes
+from deepinfer_serving.pd.entrypoint import Entrypoint
 from deepinfer_serving.pd.instance import InstanceSpec, StoreSpec
 
 _PARAMS = [
@@ -26,10 +27,12 @@ _PARAMS = [
 ]
 
 
-def _cluster(config: MiniConfig, device: str, store: StoreSpec) -> PDCoordinator:
-    return PDCoordinator(
-        InstanceSpec(EngineType.PROMPT, config, device, store),
-        InstanceSpec(EngineType.COMPLETION, config, device, store),
+def _cluster(config: MiniConfig, device: str, store: StoreSpec) -> Entrypoint:
+    return Entrypoint(
+        {
+            "prefill": InstanceSpec(EngineType.PROMPT, config, device, store),
+            "decode": InstanceSpec(EngineType.COMPLETION, config, device, store),
+        }
     )
 
 
@@ -44,10 +47,13 @@ def test_cache_hit_across_processes_and_restart(param: tuple[MiniConfig, str], t
         co.submit("t1", prompt, greedy(g + 4))
         turn2 = prompt + co.run_until_done()["t1"].tokens + tokens(config.window + config.backtrack + 3, seed=11)
         cold = run_normal(config, device, {"t2": turn2}, g + 3)["t2"]
+        # The decode instance stores its record one step after it reports the last token.
+        co.wait_for(lambda: co.directory.get((block_hashes(turn2, config.block_size)[3], 4 * g)) == {"decode"})
 
         co.submit("t2", turn2, greedy(g + 3))
         record = co.run_until_done()["t2"]
-        assert record.hit == (4 * g, 3 * g, 0)
+        assert record.hit == (4 * g, 4 * g, 0)
+        assert co.stats("decode")["swa_pulls_served"] == 1
         assert record.tokens == cold
         assert_baseline(co)
 

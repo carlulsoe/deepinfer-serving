@@ -22,6 +22,9 @@ Three kinds of document, kept separate:
   - [0008](decisions/0008-store-across-processes.md) the store across processes: shared filesystem, producer-local SWA
   - [0009](decisions/0009-cross-device-handoff.md) cross-device handoffs allowed, not oracle-checked
   - [0010](decisions/0010-store-backends-and-eviction.md) store backends, on-disk format, LRU eviction under a watermark
+  - [0011](decisions/0011-entrypoint-check-and-swa-directory.md) Entrypoint CHECK, SWA directory, SWA pulls, least-loaded routing
+  - [0012](decisions/0012-attempts-reroute-and-abort.md) attempts, re-routing after instance loss, Entrypoint-owned aborts
+  - [0013](decisions/0013-decode-drain.md) decode drain by forwarding sequences
 
 **How we get there**
 
